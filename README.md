@@ -85,11 +85,26 @@ Outputs:
 * `target/release/melt` (The drop-in executable)
 * `target/release/libmlt_7.so` (The drop-in shared library)
 
-### 2. Configure in Kdenlive
-1. In Kdenlive, open **Settings** $\rightarrow$ **Configure Kdenlive...**
-2. Go to the **Environment** tab.
-3. Under **Melt path**, set the path to your compiled binary:
-   ```text
-   /path/to/OliveMltBridge/target/release/melt
-   ```
-4. Now, every export you launch in Kdenlive will run through `OliveMltBridge`!
+### 2. Configure in Kdenlive Flatpak
+
+You can switch Kdenlive Flatpak between your project's binaries and the stock MLT using the provided switcher script:
+
+```bash
+# Check current configuration status
+./switch.sh status
+
+# Switch Flatpak to use OliveMltBridge (melt and libmlt.so)
+./switch.sh project
+
+# Switch Flatpak back to original stock MLT binaries
+./switch.sh original
+```
+
+Or simply run `./switch.sh` for an interactive menu.
+
+Alternatively, individual scripts are available in `scripts/`:
+* `scripts/switch-to-project.sh`
+* `scripts/switch-to-original.sh`
+* `scripts/status.sh`
+
+*(Note: Modifying Flatpak system files in `/var/lib/flatpak` will automatically prompt for `sudo`)*

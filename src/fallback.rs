@@ -10,6 +10,8 @@ impl UpstreamMlt {
     pub fn new() -> Self {
         // Try to locate upstream libmlt-7.so in system or flatpak locations
         let candidates = [
+            "/app/lib/libmlt-7.so.7.43.0",
+            "/var/lib/flatpak/app/org.kde.kdenlive/current/active/files/lib/libmlt-7.so.7.43.0",
             "/var/lib/flatpak/app/org.kde.kdenlive/current/active/files/lib/libmlt-7.so",
             "/usr/lib/x86_64-linux-gnu/libmlt-7.so",
             "/usr/lib/libmlt-7.so",
@@ -34,6 +36,9 @@ impl UpstreamMlt {
     /// Delegate entire rendering to the stock upstream melt binary if needed
     pub fn delegate_to_stock_melt(args: &[String]) -> std::io::Result<i32> {
         let stock_melt_candidates = [
+            "/app/bin/melt-7",
+            "/var/lib/flatpak/app/org.kde.kdenlive/current/active/files/bin/melt-7",
+            "/usr/bin/melt-7",
             "/var/lib/flatpak/app/org.kde.kdenlive/current/active/files/bin/melt",
             "/usr/bin/melt",
             "/app/bin/melt",
