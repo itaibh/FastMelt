@@ -26,12 +26,43 @@ impl Default for Profile {
 
 #[derive(Debug, Clone)]
 pub struct KeyframeRect {
-    pub time_ms: f64,
+    pub frame: u64,
     pub x: f32,
     pub y: f32,
     pub w: f32,
     pub h: f32,
     pub opacity: f32,
+}
+
+impl KeyframeRect {
+    pub fn interpolate(keyframes: &[KeyframeRect], frame: u64) -> (f32, f32, f32, f32, f32) {
+        if keyframes.is_empty() {
+            return (0.0, 0.0, 1080.0, 1920.0, 1.0);
+        }
+        if keyframes.len() == 1 || frame <= keyframes[0].frame {
+            let k = &keyframes[0];
+            return (k.x, k.y, k.w, k.h, k.opacity);
+        }
+        let last = &keyframes[keyframes.len() - 1];
+        if frame >= last.frame {
+            return (last.x, last.y, last.w, last.h, last.opacity);
+        }
+        for i in 0..keyframes.len() - 1 {
+            let k0 = &keyframes[i];
+            let k1 = &keyframes[i + 1];
+            if frame >= k0.frame && frame <= k1.frame {
+                let span = (k1.frame - k0.frame) as f32;
+                let factor = if span > 0.0 { (frame - k0.frame) as f32 / span } else { 0.0 };
+                let x = k0.x + factor * (k1.x - k0.x);
+                let y = k0.y + factor * (k1.y - k0.y);
+                let w = k0.w + factor * (k1.w - k0.w);
+                let h = k0.h + factor * (k1.h - k0.h);
+                let opacity = k0.opacity + factor * (k1.opacity - k0.opacity);
+                return (x, y, w, h, opacity);
+            }
+        }
+        (last.x, last.y, last.w, last.h, last.opacity)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -76,6 +107,12 @@ pub struct Producer {
 }
 
 #[derive(Debug, Clone)]
+pub enum PlaylistItem {
+    Entry(PlaylistEntry),
+    Blank(u64),
+}
+
+#[derive(Debug, Clone)]
 pub struct PlaylistEntry {
     pub producer_id: String,
     pub in_frame: u64,
@@ -86,7 +123,37 @@ pub struct PlaylistEntry {
 #[derive(Debug, Clone)]
 pub struct Playlist {
     pub id: String,
-    pub entries: Vec<PlaylistEntry>,
+    pub items: Vec<PlaylistItem>,
+}
+
+impl Playlist {
+    pub fn get_active_clip_at(&self, timeline_frame: u64) -> Option<(&PlaylistEntry, u64)> {
+        let mut current_frame = 0u64;
+        for item in &self.items {
+            match item {
+                PlaylistItem::Blank(len) => {
+                    if timeline_frame < current_frame + len {
+                        return None;
+                    }
+                    current_frame += len;
+                }
+                PlaylistItem::Entry(entry) => {
+                    let duration = if entry.out_frame >= entry.in_frame {
+                        entry.out_frame - entry.in_frame + 1
+                    } else {
+                        1
+                    };
+                    if timeline_frame >= current_frame && timeline_frame < current_frame + duration {
+                        let local_offset = timeline_frame - current_frame;
+                        let clip_frame = entry.in_frame + local_offset;
+                        return Some((entry, clip_frame));
+                    }
+                    current_frame += duration;
+                }
+            }
+        }
+        None
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -114,6 +181,7 @@ pub struct Consumer {
 
 #[derive(Debug, Clone)]
 pub struct MltProject {
+    pub root_dir: Option<PathBuf>,
     pub profile: Profile,
     pub producers: HashMap<String, Producer>,
     pub playlists: HashMap<String, Playlist>,
@@ -127,7 +195,10 @@ impl MltProject {
         let doc = roxmltree::Document::parse(xml_content)
             .map_err(|e| format!("Failed to parse XML: {}", e))?;
 
+        let root_dir = doc.root_element().attribute("root").map(PathBuf::from);
+
         let mut project = MltProject {
+            root_dir,
             profile: Profile::default(),
             producers: HashMap::new(),
             playlists: HashMap::new(),
@@ -178,7 +249,7 @@ impl MltProject {
                             ProducerSource::Video(PathBuf::from(resource))
                         };
 
-                        let filters = Self::parse_filters(node);
+                        let filters = Self::parse_filters(node, project.profile.frame_rate_num, project.profile.frame_rate_den);
 
                         project.producers.insert(id.to_string(), Producer {
                             id: id.to_string(),
@@ -190,22 +261,35 @@ impl MltProject {
                 }
                 "playlist" => {
                     if let Some(id) = node.attribute("id") {
-                        let mut entries = Vec::new();
+                        let mut items = Vec::new();
                         for child in node.children() {
                             if child.tag_name().name() == "entry" {
                                 let producer_id = child.attribute("producer").unwrap_or("").to_string();
-                                let filters = Self::parse_filters(child);
-                                entries.push(PlaylistEntry {
+                                let in_frame = child.attribute("in")
+                                    .map(|s| Self::parse_time_str(s, project.profile.frame_rate_num, project.profile.frame_rate_den))
+                                    .unwrap_or(0);
+                                let out_frame = child.attribute("out")
+                                    .map(|s| Self::parse_time_str(s, project.profile.frame_rate_num, project.profile.frame_rate_den))
+                                    .unwrap_or(in_frame);
+                                let filters = Self::parse_filters(child, project.profile.frame_rate_num, project.profile.frame_rate_den);
+                                items.push(PlaylistItem::Entry(PlaylistEntry {
                                     producer_id,
-                                    in_frame: 0,
-                                    out_frame: 1000,
+                                    in_frame,
+                                    out_frame,
                                     filters,
-                                });
+                                }));
+                            } else if child.tag_name().name() == "blank" {
+                                let length = child.attribute("length")
+                                    .map(|s| Self::parse_time_str(s, project.profile.frame_rate_num, project.profile.frame_rate_den))
+                                    .unwrap_or(0);
+                                if length > 0 {
+                                    items.push(PlaylistItem::Blank(length));
+                                }
                             }
                         }
                         project.playlists.insert(id.to_string(), Playlist {
                             id: id.to_string(),
-                            entries,
+                            items,
                         });
                     }
                 }
@@ -226,7 +310,7 @@ impl MltProject {
                                 tracks.push(Track { producer_id, hide });
                             }
                         }
-                        let filters = Self::parse_filters(node);
+                        let filters = Self::parse_filters(node, project.profile.frame_rate_num, project.profile.frame_rate_den);
                         
                         // Check if it's the root project tractor
                         for prop in node.children().filter(|c| c.tag_name().name() == "property") {
@@ -342,25 +426,27 @@ impl MltProject {
         })
     }
 
-    fn parse_filters(parent: roxmltree::Node) -> Vec<Filter> {
+    fn parse_filters(parent: roxmltree::Node, fps_num: u32, fps_den: u32) -> Vec<Filter> {
         let mut filters = Vec::new();
         for child in parent.children().filter(|c| c.tag_name().name() == "filter") {
             let id = child.attribute("id").unwrap_or("").to_string();
             let mut service = String::new();
             let mut rect_str = String::new();
             let mut radius_str = String::new();
-            let mut _color_str = String::new();
+            let mut color_str = String::new();
             let mut x_str = String::new();
             let mut y_str = String::new();
+            let mut disabled = false;
 
             for prop in child.children().filter(|c| c.tag_name().name() == "property") {
                 if let Some(name) = prop.attribute("name") {
                     let val = prop.text().unwrap_or("").trim();
                     match name {
+                        "disable" if val == "1" => disabled = true,
                         "mlt_service" => service = val.to_string(),
                         "rect" => rect_str = val.to_string(),
                         "radius" => radius_str = val.to_string(),
-                        "color" => _color_str = val.to_string(),
+                        "color" => color_str = val.to_string(),
                         "x" => x_str = val.to_string(),
                         "y" => y_str = val.to_string(),
                         _ => {}
@@ -368,8 +454,12 @@ impl MltProject {
                 }
             }
 
+            if disabled {
+                continue;
+            }
+
             let filter_type = if service == "qtblend" {
-                let keyframes = Self::parse_rect_keyframes(&rect_str);
+                let keyframes = Self::parse_rect_keyframes(&rect_str, fps_num, fps_den);
                 FilterType::QtBlend {
                     rect_keyframes: keyframes,
                     rotation: 0.0,
@@ -378,14 +468,21 @@ impl MltProject {
                 let radius = radius_str.split('=').last().unwrap_or("20").parse().unwrap_or(20.0);
                 let x_offset = x_str.split('=').last().unwrap_or("4").parse().unwrap_or(4.0);
                 let y_offset = y_str.split('=').last().unwrap_or("4").parse().unwrap_or(4.0);
+                let raw_color = color_str.split('=').last().unwrap_or("0x000000FF");
+                let color = if raw_color.starts_with("0x") {
+                    u32::from_str_radix(&raw_color[2..], 16).unwrap_or(0x000000FF)
+                } else {
+                    0x000000FF
+                };
                 FilterType::DropShadow {
                     radius,
                     x_offset,
                     y_offset,
-                    color: 0x000000FF,
+                    color,
                 }
             } else if service.contains("gblur") {
-                FilterType::GaussianBlur { sigma: 5.0 }
+                let sigma = radius_str.split('=').last().unwrap_or("5").parse().unwrap_or(5.0);
+                FilterType::GaussianBlur { sigma }
             } else {
                 FilterType::Passthrough(service.clone())
             };
@@ -399,18 +496,19 @@ impl MltProject {
         filters
     }
 
-    fn parse_rect_keyframes(rect_str: &str) -> Vec<KeyframeRect> {
+    fn parse_rect_keyframes(rect_str: &str, fps_num: u32, fps_den: u32) -> Vec<KeyframeRect> {
         let mut keyframes = Vec::new();
         for part in rect_str.split(';') {
             let part = part.trim();
             if part.is_empty() { continue; }
             let mut pieces = part.split('=');
-            let _time = pieces.next().unwrap_or("");
+            let time_part = pieces.next().unwrap_or("0").trim_end_matches('|');
+            let frame = Self::parse_time_str(time_part, fps_num, fps_den);
             if let Some(coords) = pieces.next() {
                 let nums: Vec<f32> = coords.split_whitespace().filter_map(|s| s.parse().ok()).collect();
                 if nums.len() >= 4 {
                     keyframes.push(KeyframeRect {
-                        time_ms: 0.0,
+                        frame,
                         x: nums[0],
                         y: nums[1],
                         w: nums[2],
@@ -422,7 +520,7 @@ impl MltProject {
         }
         if keyframes.is_empty() {
             keyframes.push(KeyframeRect {
-                time_ms: 0.0,
+                frame: 0,
                 x: 0.0,
                 y: 0.0,
                 w: 1080.0,
@@ -430,6 +528,7 @@ impl MltProject {
                 opacity: 1.0,
             });
         }
+        keyframes.sort_by_key(|k| k.frame);
         keyframes
     }
 }

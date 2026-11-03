@@ -127,7 +127,7 @@ Accelerate render speeds from **~7 fps** to **45–60+ fps** by moving layer tra
 | **CLI Dispatch** | CLI argument parsing, path decoding, logging, versioning, progress streaming. | Complete for render jobs and version queries. |
 | **XML Parsing** | Profiles, producers, playlists, tractors, filters, consumer target, frame calculation. | Extract audio chains and keyframe interpolation curves. |
 | **Compositor** | Parallel CPU `blend_layer`, separable blur, drop shadow in `pipeline.rs`. | Transition from CPU `rayon` to GPU shaders (Vulkan/EGL compute). |
-| **Timeline Engine** | Keyframe structs exist in parser. | Need frame-by-frame timeline slice evaluator ($t \to \text{active tracks}$). |
+| **Timeline Engine** | Frame-by-frame slice evaluator, linear keyframe interpolation, active track stacking. | Complete (Phase 2). |
 | **Consumer / Sink** | Direct VA-API hardware encoder subprocess (`/dev/dri/renderD128`) with piped RGBA framebuffers. | Complete (Phase 1). |
 | **Audio** | Not implemented. | Mix timeline audio and mux with video track in container. |
 
@@ -143,14 +143,17 @@ Accelerate render speeds from **~7 fps** to **45–60+ fps** by moving layer tra
   - Stream progress to `stdout` in real time.
 - **Status**: Verified working with hardware VA-API acceleration on `/dev/dri/renderD128`, outputting valid H.264 MP4 videos directly.
 
-### Phase 2: Frame-by-Frame Timeline Slice Evaluator [CURRENT]
+### Phase 2: Frame-by-Frame Timeline Slice Evaluator [COMPLETED]
 - **Goal**: Accurately evaluate active timeline producers, cuts, and keyframe transitions at frame $t$.
 - **Implementation**:
-  - Implement `evaluate_frame(t)` on `MltProject`.
-  - Resolve keyframe rects and opacity curves using linear interpolation for affine transforms (`qtblend`).
-  - Stack and blend all active layers for frame $t$ in correct track order.
+  - Implemented `TimelineEvaluator` in `src/evaluator.rs` with `evaluate_frame(t, fb)`.
+  - Added `TextureCache` in `src/cache.rs` to cache static image textures in memory.
+  - Resolved keyframe rects and opacity curves using linear interpolation for affine transforms (`qtblend`).
+  - Implemented playlist active clip resolution taking `<blank length="..."/>` and clip `in`/`out` cuts into account.
+  - Stack and blend all active layers for frame $t$ in correct track order (nested tractors, playlists, tracks).
+- **Status**: Verified working with unit tests (`tests/evaluator_test.rs`) and end-to-end multi-track animated rendering test at 64.7 fps.
 
-### Phase 3: GPU Compute Shader Integration
+### Phase 3: GPU Compute Shader Integration [CURRENT]
 - **Goal**: Reach target render throughput of $\ge 45\text{--}60\text{ fps}$.
 - **Implementation**:
   - Port `blend_layer` to a GPU quad/blitter shader.

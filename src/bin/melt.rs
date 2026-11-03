@@ -1,4 +1,6 @@
+use mlt_7::cache::TextureCache;
 use mlt_7::encoder::HardwareEncoder;
+use mlt_7::evaluator::TimelineEvaluator;
 use mlt_7::fallback::UpstreamMlt;
 use mlt_7::logger::log_msg;
 use mlt_7::parser::MltProject;
@@ -210,13 +212,18 @@ fn main() {
 
             match HardwareEncoder::new(width, height, fps_num, fps_den, target) {
                 Ok(mut encoder) => {
+                    let mut cache = TextureCache::new();
+                    let mut evaluator = TimelineEvaluator::new(proj, &mut cache);
                     let mut fb = FrameBuffer::new(width, height);
-                    fb.clear(image::Rgba([0, 0, 0, 255]));
-                    let raw_frame = fb.raw_bytes();
 
                     let mut render_success = true;
+                    let start_offset = cli_in.unwrap_or(0);
+
                     for frame in 1..=total_frames {
-                        if let Err(e) = encoder.write_frame(raw_frame) {
+                        let timeline_frame = start_offset + frame - 1;
+                        evaluator.evaluate_frame(timeline_frame, &mut fb);
+
+                        if let Err(e) = encoder.write_frame(fb.raw_bytes()) {
                             log_msg("MELT", &format!("Hardware encoder pipe error at frame {}: {}", frame, e));
                             render_success = false;
                             break;
