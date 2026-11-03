@@ -15,7 +15,7 @@ impl<'a> TimelineEvaluator<'a> {
 
     pub fn evaluate_frame(&mut self, frame: u64, fb: &mut FrameBuffer) {
         // Clear background with black opaque color
-        fb.clear(image::Rgba([0, 0, 0, 255]));
+        fb.clear([0, 0, 0, 255]);
 
         if let Some(ref root_id) = self.project.root_tractor_id {
             self.render_tractor(root_id, frame, fb, 0);
@@ -81,9 +81,9 @@ impl<'a> TimelineEvaluator<'a> {
                 if let Some(ref qtblend) = qtblend_opt {
                     let (x, y, w, h, opacity) = KeyframeRect::interpolate(qtblend, clip_frame);
                     let mut sub_fb = FrameBuffer::new(fb.width, fb.height);
-                    sub_fb.clear(image::Rgba([0, 0, 0, 0]));
+                    sub_fb.clear([0, 0, 0, 0]);
                     self.render_tractor(prod_id, clip_frame, &mut sub_fb, depth + 1);
-                    fb.blend_layer(&sub_fb.data, x as i32, y as i32, w as u32, h as u32, opacity);
+                    fb.blend_buffer(&sub_fb, x as i32, y as i32, w as u32, h as u32, opacity);
                 } else {
                     self.render_tractor(prod_id, clip_frame, fb, depth + 1);
                 }
@@ -115,12 +115,29 @@ impl<'a> TimelineEvaluator<'a> {
             ProducerSource::Image(rel_or_abs_path) => {
                 let resolved_path = self.resolve_path(rel_or_abs_path);
                 if let Some(img) = self.cache.get_or_load(&resolved_path).cloned() {
+                    // 1. Drop shadow is rendered behind the image at (x + x_off, y + y_off)
                     if let Some((radius, x_off, y_off, color)) = drop_shadow {
-                        fb.render_drop_shadow(&img, radius, x_off, y_off, color);
+                        fb.render_drop_shadow(
+                            &img,
+                            (x + x_off) as i32,
+                            (y + y_off) as i32,
+                            w as u32,
+                            h as u32,
+                            radius,
+                            color,
+                            opacity * 0.8,
+                        );
                     }
-                    fb.blend_layer(&img, x as i32, y as i32, w as u32, h as u32, opacity);
+
+                    // 2. Blend image (use pre-cached blurred texture if Gaussian blur filter is present)
                     if let Some(sigma) = gaussian_blur {
-                        fb.apply_separable_blur(sigma);
+                        if let Some(blurred_img) = self.cache.get_or_load_blurred(&resolved_path, sigma) {
+                            fb.blend_layer(blurred_img, x as i32, y as i32, w as u32, h as u32, opacity);
+                        } else {
+                            fb.blend_layer(&img, x as i32, y as i32, w as u32, h as u32, opacity);
+                        }
+                    } else {
+                        fb.blend_layer(&img, x as i32, y as i32, w as u32, h as u32, opacity);
                     }
                 }
             }
@@ -128,10 +145,12 @@ impl<'a> TimelineEvaluator<'a> {
                 let r = ((color >> 24) & 0xFF) as u8;
                 let g = ((color >> 16) & 0xFF) as u8;
                 let b = ((color >> 8) & 0xFF) as u8;
-                let a = (color & 0xFF) as u8;
+                let a = (((color & 0xFF) as f32 / 255.0) * opacity * 255.0).round().clamp(0.0, 255.0) as u8;
 
                 if opacity >= 0.99 && x <= 0.0 && y <= 0.0 && w >= fb.width as f32 && h >= fb.height as f32 {
-                    fb.clear(image::Rgba([r, g, b, a]));
+                    fb.clear([r, g, b, 255]);
+                } else {
+                    fb.fill_rect(x as i32, y as i32, w as u32, h as u32, [r, g, b, a]);
                 }
             }
             ProducerSource::NestedTractor(tid) => {
@@ -149,8 +168,8 @@ impl<'a> TimelineEvaluator<'a> {
         extra_filters: Option<&'b [crate::parser::Filter]>,
     ) -> (
         Option<&'b Vec<KeyframeRect>>,
-        Option<(f32, f32, f32, u32)>, // drop shadow
-        Option<f32>,                  // blur
+        Option<(f32, f32, f32, u32)>, // drop shadow: (radius, x_off, y_off, color)
+        Option<f32>,                  // blur: sigma
     ) {
         let mut kfs = None;
         let mut shadow = None;

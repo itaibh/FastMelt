@@ -171,7 +171,7 @@ fn main() {
         let mut fb = FrameBuffer::new(1080, 1920);
         let total_frames = 100;
         for frame in 1..=total_frames {
-            fb.clear(image::Rgba([0, 0, 0, 255]));
+            fb.clear([0, 0, 0, 255]);
             let elapsed = start_time.elapsed().as_secs_f64();
             let fps = if elapsed > 0.001 { (frame as f64) / elapsed } else { 0.0 };
             if progress_mode {

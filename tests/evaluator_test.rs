@@ -1,4 +1,6 @@
 use mlt_7::parser::{KeyframeRect, Playlist, PlaylistEntry, PlaylistItem};
+use mlt_7::pipeline::FrameBuffer;
+use image::{Rgba, RgbaImage};
 
 #[test]
 fn test_keyframe_interpolation() {
@@ -79,4 +81,71 @@ fn test_playlist_active_clip_resolution() {
 
     // Frame 50: Past end of playlist
     assert!(playlist.get_active_clip_at(50).is_none());
+}
+
+#[test]
+fn test_blitter_and_alpha_composite() {
+    let mut fb = FrameBuffer::new(100, 100);
+    fb.clear([0, 0, 0, 255]); // Black background
+
+    // Create a 20x20 red square with 100% opacity
+    let mut red_square = RgbaImage::new(20, 20);
+    for p in red_square.pixels_mut() {
+        *p = Rgba([255, 0, 0, 255]);
+    }
+
+    // Blend onto fb at (10, 10)
+    fb.blend_layer(&red_square, 10, 10, 20, 20, 1.0);
+
+    let raw = fb.raw_bytes();
+    // Pixel inside square (15, 15) should be red
+    let idx = (15 * 100 + 15) * 4;
+    assert_eq!(raw[idx], 255);
+    assert_eq!(raw[idx + 1], 0);
+    assert_eq!(raw[idx + 2], 0);
+    assert_eq!(raw[idx + 3], 255);
+
+    // Pixel outside square (5, 5) should remain black
+    let out_idx = (5 * 100 + 5) * 4;
+    assert_eq!(raw[out_idx], 0);
+    assert_eq!(raw[out_idx + 1], 0);
+    assert_eq!(raw[out_idx + 2], 0);
+    assert_eq!(raw[out_idx + 3], 255);
+}
+
+#[test]
+fn test_separable_blur_energy_conservation() {
+    let mut fb = FrameBuffer::new(50, 50);
+    fb.clear([0, 0, 0, 0]);
+
+    // Draw single point of high energy at center
+    let center_idx = (25 * 50 + 25) * 4;
+    fb.data[center_idx] = 200;
+    fb.data[center_idx + 3] = 255;
+
+    fb.apply_separable_blur(3.0);
+
+    // After blur, center should have spread to neighboring pixels
+    let raw = fb.raw_bytes();
+    let neighbor_idx = (25 * 50 + 26) * 4;
+    assert!(raw[neighbor_idx] > 0, "Neighbor pixel should receive energy from blur");
+}
+
+#[test]
+fn test_drop_shadow_placement() {
+    let mut fb = FrameBuffer::new(200, 200);
+    fb.clear([255, 255, 255, 255]); // White canvas
+
+    let mut dot = RgbaImage::new(10, 10);
+    for p in dot.pixels_mut() {
+        *p = Rgba([0, 0, 0, 255]);
+    }
+
+    // Render drop shadow at x=50, y=50 with offset 10, 10 -> shadow at 60, 60
+    fb.render_drop_shadow(&dot, 60, 60, 10, 10, 2.0, 0x000000FF, 1.0);
+
+    let raw = fb.raw_bytes();
+    // Pixel around (65, 65) should have darkened (shadow presence)
+    let shadow_idx = (65 * 200 + 65) * 4;
+    assert!(raw[shadow_idx] < 255, "Shadow should darken background around (65, 65)");
 }
