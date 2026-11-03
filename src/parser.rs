@@ -98,6 +98,8 @@ pub struct Track {
 #[derive(Debug, Clone)]
 pub struct Tractor {
     pub id: String,
+    pub in_frame: u64,
+    pub out_frame: u64,
     pub tracks: Vec<Track>,
     pub filters: Vec<Filter>,
 }
@@ -133,6 +135,8 @@ impl MltProject {
             root_tractor_id: None,
             consumer: None,
         };
+
+        let mut last_tractor_id = None;
 
         for node in doc.descendants() {
             match node.tag_name().name() {
@@ -207,6 +211,13 @@ impl MltProject {
                 }
                 "tractor" => {
                     if let Some(id) = node.attribute("id") {
+                        let in_frame = node.attribute("in")
+                            .map(|s| Self::parse_time_str(s, project.profile.frame_rate_num, project.profile.frame_rate_den))
+                            .unwrap_or(0);
+                        let out_frame = node.attribute("out")
+                            .map(|s| Self::parse_time_str(s, project.profile.frame_rate_num, project.profile.frame_rate_den))
+                            .unwrap_or(0);
+
                         let mut tracks = Vec::new();
                         for child in node.children() {
                             if child.tag_name().name() == "track" {
@@ -224,8 +235,12 @@ impl MltProject {
                             }
                         }
 
+                        last_tractor_id = Some(id.to_string());
+
                         project.tractors.insert(id.to_string(), Tractor {
                             id: id.to_string(),
+                            in_frame,
+                            out_frame,
                             tracks,
                             filters,
                         });
@@ -263,7 +278,68 @@ impl MltProject {
         }
 
 
+        if project.root_tractor_id.is_none() {
+            project.root_tractor_id = last_tractor_id;
+        }
+
         Ok(project)
+    }
+
+    pub fn parse_time_str(time_str: &str, fps_num: u32, fps_den: u32) -> u64 {
+        let s = time_str.trim();
+        if s.is_empty() {
+            return 0;
+        }
+        if let Ok(f) = s.parse::<u64>() {
+            return f;
+        }
+        let fps = (fps_num as f64) / (fps_den.max(1) as f64);
+        let colon_parts: Vec<&str> = s.split(':').collect();
+        match colon_parts.len() {
+            3 => {
+                // HH:MM:SS or HH:MM:SS.mmm
+                let h: f64 = colon_parts[0].parse().unwrap_or(0.0);
+                let m: f64 = colon_parts[1].parse().unwrap_or(0.0);
+                let s_val: f64 = colon_parts[2].parse().unwrap_or(0.0);
+                let total_sec = h * 3600.0 + m * 60.0 + s_val;
+                (total_sec * fps).round() as u64
+            }
+            4 => {
+                // HH:MM:SS:FF
+                let h: u64 = colon_parts[0].parse().unwrap_or(0);
+                let m: u64 = colon_parts[1].parse().unwrap_or(0);
+                let s_val: u64 = colon_parts[2].parse().unwrap_or(0);
+                let f_val: u64 = colon_parts[3].parse().unwrap_or(0);
+                let total_sec = (h * 3600 + m * 60 + s_val) as f64;
+                (total_sec * fps).round() as u64 + f_val
+            }
+            _ => 0,
+        }
+    }
+
+    pub fn get_total_frames(&self) -> u64 {
+        if let Some(ref root_id) = self.root_tractor_id {
+            if let Some(t) = self.tractors.get(root_id) {
+                if t.out_frame > t.in_frame {
+                    return t.out_frame - t.in_frame + 1;
+                }
+            }
+        }
+        self.tractors
+            .values()
+            .map(|t| if t.out_frame > t.in_frame { t.out_frame - t.in_frame + 1 } else { 0 })
+            .max()
+            .unwrap_or(100)
+    }
+
+    pub fn get_consumer_target(&self) -> Option<String> {
+        self.consumer.as_ref().and_then(|c| {
+            if !c.target.is_empty() && c.target != "null" {
+                Some(c.target.clone())
+            } else {
+                None
+            }
+        })
     }
 
     fn parse_filters(parent: roxmltree::Node) -> Vec<Filter> {

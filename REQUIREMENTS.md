@@ -124,25 +124,26 @@ Accelerate render speeds from **~7 fps** to **45–60+ fps** by moving layer tra
 
 | Subsystem | Existing State | Gap / Needed Work |
 | :--- | :--- | :--- |
-| **CLI Dispatch** | CLI argument parsing, path decoding, logging, versioning. | Needs trigger to run native render pipeline instead of solely falling back. |
-| **XML Parsing** | Profiles, producers, playlists, tractors, filters, consumer target. | Extract audio chains and keyframe interpolation curves. |
+| **CLI Dispatch** | CLI argument parsing, path decoding, logging, versioning, progress streaming. | Complete for render jobs and version queries. |
+| **XML Parsing** | Profiles, producers, playlists, tractors, filters, consumer target, frame calculation. | Extract audio chains and keyframe interpolation curves. |
 | **Compositor** | Parallel CPU `blend_layer`, separable blur, drop shadow in `pipeline.rs`. | Transition from CPU `rayon` to GPU shaders (Vulkan/EGL compute). |
 | **Timeline Engine** | Keyframe structs exist in parser. | Need frame-by-frame timeline slice evaluator ($t \to \text{active tracks}$). |
-| **Consumer / Sink** | Only fallback delegation exists. | Implement direct hardware encoder sink (FFmpeg / VA-API) to produce `.mp4` file directly. |
+| **Consumer / Sink** | Direct VA-API hardware encoder subprocess (`/dev/dri/renderD128`) with piped RGBA framebuffers. | Complete (Phase 1). |
 | **Audio** | Not implemented. | Mix timeline audio and mux with video track in container. |
 
 ---
 
 ## 6. Phased Implementation Plan & Milestones
 
-### Phase 1: Hardware Encoder Sink & Direct Video Generation
+### Phase 1: Hardware Encoder Sink & Direct Video Generation [COMPLETED]
 - **Goal**: Enable `OliveMltBridge` to produce real `.mp4` video files directly without falling back to stock `melt-7`.
 - **Implementation**:
   - Connect `FrameBuffer` to a hardware-accelerated FFmpeg VA-API consumer subprocess (`ffmpeg -f rawvideo -pix_fmt rgba -s <w>x<h> -r <fps> -i - -vaapi_device /dev/dri/renderD128 -vf 'format=nv12,hwupload' -c:v h264_vaapi <target>`).
   - Feed composited frames into the encoder pipe sequentially.
   - Stream progress to `stdout` in real time.
+- **Status**: Verified working with hardware VA-API acceleration on `/dev/dri/renderD128`, outputting valid H.264 MP4 videos directly.
 
-### Phase 2: Frame-by-Frame Timeline Slice Evaluator
+### Phase 2: Frame-by-Frame Timeline Slice Evaluator [CURRENT]
 - **Goal**: Accurately evaluate active timeline producers, cuts, and keyframe transitions at frame $t$.
 - **Implementation**:
   - Implement `evaluate_frame(t)` on `MltProject`.

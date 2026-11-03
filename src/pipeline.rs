@@ -22,6 +22,10 @@ impl FrameBuffer {
         }
     }
 
+    pub fn raw_bytes(&self) -> &[u8] {
+        self.data.as_raw()
+    }
+
     /// Accelerated Alpha-Over Blending with Affine Transform (Replaces CPU qtblend)
     pub fn blend_layer(
         &mut self,

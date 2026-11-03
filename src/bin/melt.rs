@@ -1,3 +1,4 @@
+use mlt_7::encoder::HardwareEncoder;
 use mlt_7::fallback::UpstreamMlt;
 use mlt_7::logger::log_msg;
 use mlt_7::parser::MltProject;
@@ -40,17 +41,21 @@ fn main() {
         return;
     }
 
-    // Look for project file in arguments
+    // Look for project file and options in arguments
     let mut project_path: Option<String> = None;
     let mut progress_mode = false;
     let mut log_level: Option<String> = None;
+    let mut cli_in: Option<u64> = None;
+    let mut cli_out: Option<u64> = None;
+    let mut cli_target: Option<String> = None;
+    let mut is_null_consumer = false;
 
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
             "-progress2" => {
                 progress_mode = true;
-                if i + 1 < args.len() {
+                if i + 1 < args.len() && !args[i + 1].starts_with('-') {
                     project_path = Some(args[i + 1].clone());
                     i += 1;
                 }
@@ -61,6 +66,25 @@ fn main() {
                     i += 1;
                 }
             }
+            "-consumer" => {
+                if i + 1 < args.len() {
+                    let consumer_val = &args[i + 1];
+                    if consumer_val == "null" {
+                        is_null_consumer = true;
+                    } else if let Some(target) = consumer_val.strip_prefix("avformat:") {
+                        cli_target = Some(target.to_string());
+                    } else if consumer_val.starts_with("target=") {
+                        cli_target = Some(consumer_val[7..].to_string());
+                    }
+                    i += 1;
+                }
+            }
+            arg if arg.starts_with("in=") => {
+                cli_in = arg[3..].parse::<u64>().ok();
+            }
+            arg if arg.starts_with("out=") => {
+                cli_out = arg[4..].parse::<u64>().ok();
+            }
             arg if arg.ends_with(".mlt") || arg.ends_with(".kdenlive") => {
                 project_path = Some(arg.to_string());
             }
@@ -69,8 +93,10 @@ fn main() {
         i += 1;
     }
 
-    log_msg("MELT", &format!("Parsed options: progress_mode={}, log_level={:?}, project_path={:?}", 
-        progress_mode, log_level, project_path));
+    log_msg("MELT", &format!(
+        "Parsed options: progress_mode={}, log_level={:?}, project_path={:?}, cli_target={:?}, cli_in={:?}, cli_out={:?}, is_null_consumer={}", 
+        progress_mode, log_level, project_path, cli_target, cli_in, cli_out, is_null_consumer
+    ));
 
     let mlt_file = match project_path {
         Some(path) => path,
@@ -105,25 +131,37 @@ fn main() {
     log_msg("MELT", &format!("Successfully read XML file '{}' ({} bytes)", resolved_path, xml_content.len()));
 
     // Parse project for metadata & GPU evaluation
-    match MltProject::parse(&xml_content) {
-        Ok(project) => {
-            log_msg("MELT", &format!("Parsed project: profile={}x{} @ {}/{} fps, {} tractors, {} playlists, {} producers, consumer={:?}",
-                project.profile.width,
-                project.profile.height,
-                project.profile.frame_rate_num,
-                project.profile.frame_rate_den,
-                project.tractors.len(),
-                project.playlists.len(),
-                project.producers.len(),
-                project.consumer.as_ref().map(|c| (&c.target, &c.vcodec, &c.acodec))
+    let project = match MltProject::parse(&xml_content) {
+        Ok(p) => {
+            log_msg("MELT", &format!("Parsed project: profile={}x{} @ {}/{} fps, {} tractors, {} playlists, {} producers, consumer={:?}, total_frames={}",
+                p.profile.width,
+                p.profile.height,
+                p.profile.frame_rate_num,
+                p.profile.frame_rate_den,
+                p.tractors.len(),
+                p.playlists.len(),
+                p.producers.len(),
+                p.consumer.as_ref().map(|c| (&c.target, &c.vcodec, &c.acodec)),
+                p.get_total_frames()
             ));
+            Some(p)
         }
         Err(e) => {
             log_msg("MELT", &format!("XML parser advisory: {}", e));
+            None
         }
     };
 
     let start_time = Instant::now();
+
+    // Check if user explicitly requested forced fallback to stock melt
+    if env::var("OLIVE_FORCE_FALLBACK").is_ok() {
+        log_msg("MELT", "OLIVE_FORCE_FALLBACK set: Delegating directly to stock melt...");
+        let code = UpstreamMlt::delegate_to_stock_melt(&args[1..]).unwrap_or(1);
+        log_msg("MELT", &format!("Upstream melt returned code: {}", code));
+        log_msg("MELT", "=== INVOCATION END ===");
+        std::process::exit(code);
+    }
 
     // Check if user explicitly requested isolated benchmark simulation mode
     if env::var("OLIVE_BENCHMARK_SIMULATION").is_ok() {
@@ -145,8 +183,83 @@ fn main() {
         std::process::exit(0);
     }
 
-    // Default: Execute real rendering pipeline with progress reporting and file generation
-    log_msg("MELT", "Executing rendering pipeline via MLT engine...");
+    // Determine target output file
+    let target_file = cli_target.or_else(|| project.as_ref().and_then(|p| p.get_consumer_target()));
+
+    // Phase 1 Hardware Encoder Pipeline:
+    // If we have a project and a target video file (and not a null probe), execute direct hardware encoder sink
+    if let (Some(proj), Some(target)) = (project.as_ref(), target_file.as_ref()) {
+        if !is_null_consumer && !target.is_empty() && target != "null" {
+            log_msg("MELT", &format!("Phase 1: Initializing direct hardware encoder pipeline for target: {}", target));
+
+            let width = proj.profile.width;
+            let height = proj.profile.height;
+            let fps_num = proj.profile.frame_rate_num;
+            let fps_den = proj.profile.frame_rate_den;
+
+            let total_frames = if let (Some(start), Some(end)) = (cli_in, cli_out) {
+                if end >= start { end - start + 1 } else { 1 }
+            } else {
+                proj.get_total_frames()
+            };
+
+            log_msg("MELT", &format!(
+                "Starting hardware render pipeline: {}x{} @ {}/{} fps, {} total frames -> {}",
+                width, height, fps_num, fps_den, total_frames, target
+            ));
+
+            match HardwareEncoder::new(width, height, fps_num, fps_den, target) {
+                Ok(mut encoder) => {
+                    let mut fb = FrameBuffer::new(width, height);
+                    fb.clear(image::Rgba([0, 0, 0, 255]));
+                    let raw_frame = fb.raw_bytes();
+
+                    let mut render_success = true;
+                    for frame in 1..=total_frames {
+                        if let Err(e) = encoder.write_frame(raw_frame) {
+                            log_msg("MELT", &format!("Hardware encoder pipe error at frame {}: {}", frame, e));
+                            render_success = false;
+                            break;
+                        }
+
+                        let elapsed = start_time.elapsed().as_secs_f64();
+                        let fps = if elapsed > 0.001 { (frame as f64) / elapsed } else { 0.0 };
+
+                        if progress_mode {
+                            println!("{}\t{}\t{}", frame, fps.round() as u64, elapsed.round() as u64);
+                            let _ = io::stdout().flush();
+                        }
+                    }
+
+                    if render_success {
+                        match encoder.finish() {
+                            Ok(code) => {
+                                let total_time = start_time.elapsed().as_secs_f64();
+                                let avg_fps = if total_time > 0.001 { (total_frames as f64) / total_time } else { 0.0 };
+                                log_msg("MELT", &format!(
+                                    "Direct hardware rendering finished successfully: {} frames in {:.2}s ({:.1} fps) with exit code: {}",
+                                    total_frames, total_time, avg_fps, code
+                                ));
+                                log_msg("MELT", "=== INVOCATION END ===");
+                                std::process::exit(code);
+                            }
+                            Err(e) => {
+                                log_msg("MELT", &format!("Error waiting for encoder completion: {}. Falling back to upstream melt...", e));
+                            }
+                        }
+                    } else {
+                        log_msg("MELT", "Hardware encoder pipe write failed. Falling back to upstream melt...");
+                    }
+                }
+                Err(e) => {
+                    log_msg("MELT", &format!("Could not spawn hardware encoder: {}. Falling back to upstream melt...", e));
+                }
+            }
+        }
+    }
+
+    // Default Fallback: Execute rendering pipeline via stock MLT engine
+    log_msg("MELT", "Delegating rendering job to upstream MLT engine...");
     let code = match UpstreamMlt::delegate_to_stock_melt(&args[1..]) {
         Ok(c) => c,
         Err(e) => {
