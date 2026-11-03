@@ -88,19 +88,34 @@ impl<'a> TimelineEvaluator<'a> {
 
                 // If the entry has transform filters (qtblend)
                 let qtblend_opt = entry.filters.iter().find_map(|f| {
-                    if let FilterType::QtBlend { ref rect_keyframes, .. } = f.filter_type {
-                        Some(rect_keyframes.clone())
+                    if let FilterType::QtBlend { ref rect_keyframes, ref rotation_keyframes, rotate_center, distort } = f.filter_type {
+                        Some((rect_keyframes.clone(), rotation_keyframes.clone(), rotate_center, distort))
                     } else {
                         None
                     }
                 });
 
-                if let Some(ref qtblend) = qtblend_opt {
-                    let (x, y, w, h, opacity) = KeyframeRect::interpolate(qtblend, clip_frame);
+                if let Some((ref rect_kfs, ref rot_kfs, rc, dist)) = qtblend_opt {
+                    let (rx, ry, rw, rh, opacity) = KeyframeRect::interpolate(rect_kfs, clip_frame);
+                    let rot = MltProject::interpolate_float(rot_kfs, clip_frame);
+
                     let mut sub_fb = FrameBuffer::new(fb.width, fb.height);
                     sub_fb.clear([0, 0, 0, 0]);
                     self.render_tractor(prod_id, clip_frame, &mut sub_fb, depth + 1);
-                    fb.blend_buffer(&sub_fb, x as i32, y as i32, w as u32, h as u32, opacity);
+
+                    fb.blend_affine(
+                        sub_fb.raw_bytes(),
+                        sub_fb.width,
+                        sub_fb.height,
+                        rx,
+                        ry,
+                        rw,
+                        rh,
+                        rot,
+                        rc,
+                        dist,
+                        opacity,
+                    );
                 } else {
                     self.render_tractor(prod_id, clip_frame, fb, depth + 1);
                 }
@@ -120,12 +135,14 @@ impl<'a> TimelineEvaluator<'a> {
         fb: &mut FrameBuffer,
         depth: u32,
     ) {
-        let (rect_keyframes, drop_shadow, gaussian_blur, tint, hflip) = self.collect_filters(producer, extra_filters);
+        let (qtblend, drop_shadow, gaussian_blur, tint, hflip) = self.collect_filters(producer, extra_filters);
 
-        let (x, y, w, h, opacity) = if let Some(kfs) = rect_keyframes {
-            KeyframeRect::interpolate(kfs, clip_frame)
+        let (rx, ry, rw, rh, opacity, rotation, rotate_center, distort) = if let Some((rect_kfs, rot_kfs, rc, dist)) = qtblend {
+            let (x, y, w, h, op) = KeyframeRect::interpolate(rect_kfs, clip_frame);
+            let rot = MltProject::interpolate_float(rot_kfs, clip_frame);
+            (x, y, w, h, op, rot, rc, dist)
         } else {
-            (0.0, 0.0, fb.width as f32, fb.height as f32, 1.0)
+            (0.0, 0.0, fb.width as f32, fb.height as f32, 1.0, 0.0, false, false)
         };
 
         match &producer.source {
@@ -135,22 +152,57 @@ impl<'a> TimelineEvaluator<'a> {
                 let sigma_val = gaussian_blur.unwrap_or(0.0);
 
                 if let Some(img) = self.cache.get_or_load_processed(&resolved_path, tint_opt, sigma_val, hflip).cloned() {
-                    // 1. Drop shadow is rendered behind the image at (x + x_off, y + y_off)
+                    let src_w = img.width();
+                    let src_h = img.height();
+
+                    // Calculate actual drawn geometry (accounting for distort = false aspect ratio preservation)
+                    let (draw_x, draw_y, draw_w, draw_h) = if distort {
+                        (rx, ry, rw, rh)
+                    } else if rw > 0.0 && rh > 0.0 && src_w > 0 && src_h > 0 {
+                        let src_aspect = src_w as f32 / src_h as f32;
+                        let target_aspect = rw / rh;
+                        let scale = if src_aspect >= target_aspect {
+                            rw / src_w as f32
+                        } else {
+                            rh / src_h as f32
+                        };
+                        let dw = src_w as f32 * scale;
+                        let dh = src_h as f32 * scale;
+                        let fx = rx + (rw - dw) / 2.0;
+                        let fy = ry + (rh - dh) / 2.0;
+                        (fx, fy, dw, dh)
+                    } else {
+                        (rx, ry, rw, rh)
+                    };
+
+                    // 1. Drop shadow is rendered behind the image at (draw_x + x_off, draw_y + y_off)
                     if let Some((radius, x_off, y_off, color)) = drop_shadow {
                         fb.render_drop_shadow(
                             &img,
-                            (x + x_off) as i32,
-                            (y + y_off) as i32,
-                            w as u32,
-                            h as u32,
+                            (draw_x + x_off) as i32,
+                            (draw_y + y_off) as i32,
+                            draw_w.round().max(1.0) as u32,
+                            draw_h.round().max(1.0) as u32,
                             radius,
                             color,
                             opacity * 0.8,
                         );
                     }
 
-                    // 2. Blend processed image
-                    fb.blend_layer(&img, x as i32, y as i32, w as u32, h as u32, opacity);
+                    // 2. Blend processed image with full 2D affine transform (rotation + aspect scaling)
+                    fb.blend_affine(
+                        img.as_raw(),
+                        src_w,
+                        src_h,
+                        rx,
+                        ry,
+                        rw,
+                        rh,
+                        rotation,
+                        rotate_center,
+                        distort,
+                        opacity,
+                    );
                 }
             }
             ProducerSource::Color(color) => {
@@ -161,10 +213,10 @@ impl<'a> TimelineEvaluator<'a> {
                 let a = (((color[3] as f32 / 255.0) * opacity * 255.0)).round().clamp(0.0, 255.0) as u8;
                 let c = [color[0], color[1], color[2], a];
 
-                if opacity >= 0.99 && a == 255 && x <= 0.0 && y <= 0.0 && w >= fb.width as f32 && h >= fb.height as f32 {
+                if opacity >= 0.99 && a == 255 && rx <= 0.0 && ry <= 0.0 && rw >= fb.width as f32 && rh >= fb.height as f32 {
                     fb.clear(c);
                 } else {
-                    fb.fill_rect(x as i32, y as i32, w as u32, h as u32, c);
+                    fb.fill_rect(rx as i32, ry as i32, rw as u32, rh as u32, c);
                 }
             }
             ProducerSource::NestedTractor(tid) => {
@@ -181,13 +233,13 @@ impl<'a> TimelineEvaluator<'a> {
         producer: &'b crate::parser::Producer,
         extra_filters: Option<&'b [crate::parser::Filter]>,
     ) -> (
-        Option<&'b Vec<KeyframeRect>>,
-        Option<(f32, f32, f32, u32)>, // drop shadow: (radius, x_off, y_off, color)
-        Option<f32>,                  // blur: sigma
-        Option<([u8; 4], f32)>,       // tint: (color, amount)
-        bool,                         // hflip
+        Option<(&'b Vec<KeyframeRect>, &'b Vec<(u64, f32)>, bool, bool)>, // (rect_kfs, rot_kfs, rotate_center, distort)
+        Option<(f32, f32, f32, u32)>,                                     // drop shadow: (radius, x_off, y_off, color)
+        Option<f32>,                                                      // blur: sigma
+        Option<([u8; 4], f32)>,                                          // tint: (color, amount)
+        bool,                                                             // hflip
     ) {
-        let mut kfs = None;
+        let mut qtblend = None;
         let mut shadow = None;
         let mut blur = None;
         let mut tint = None;
@@ -197,9 +249,9 @@ impl<'a> TimelineEvaluator<'a> {
 
         for f in all_filters {
             match &f.filter_type {
-                FilterType::QtBlend { rect_keyframes, .. } => {
-                    if kfs.is_none() {
-                        kfs = Some(rect_keyframes);
+                FilterType::QtBlend { rect_keyframes, rotation_keyframes, rotate_center, distort } => {
+                    if qtblend.is_none() {
+                        qtblend = Some((rect_keyframes, rotation_keyframes, *rotate_center, *distort));
                     }
                 }
                 FilterType::DropShadow { radius, x_offset, y_offset, color } => {
@@ -224,7 +276,7 @@ impl<'a> TimelineEvaluator<'a> {
             }
         }
 
-        (kfs, shadow, blur, tint, hflip)
+        (qtblend, shadow, blur, tint, hflip)
     }
 
     fn resolve_path(&self, p: &std::path::Path) -> PathBuf {

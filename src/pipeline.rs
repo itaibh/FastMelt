@@ -1,5 +1,6 @@
 use image::RgbaImage;
 use rayon::prelude::*;
+use glam::{vec2, Affine2};
 
 pub struct FrameBuffer {
     pub width: u32,
@@ -34,7 +35,28 @@ impl FrameBuffer {
         &self.data
     }
 
-    /// Parallel integer fixed-point alpha-over blitter with bilinear sampling
+    pub fn blend_layer(
+        &mut self,
+        source: &RgbaImage,
+        dst_x: i32,
+        dst_y: i32,
+        dst_w: u32,
+        dst_h: u32,
+        opacity: f32,
+    ) {
+        self.blend_raw(
+            source.as_raw(),
+            source.width(),
+            source.height(),
+            dst_x,
+            dst_y,
+            dst_w,
+            dst_h,
+            opacity,
+        );
+    }
+
+    /// Parallel integer fixed-point alpha-over blitter
     pub fn blend_raw(
         &mut self,
         src_data: &[u8],
@@ -117,48 +139,181 @@ impl FrameBuffer {
             });
     }
 
-    /// Blend an image source onto this framebuffer
-    pub fn blend_layer(
+    /// Full 2D Affine Transformation Blitter (supports rotation, scaling, aspect ratio preservation)
+    pub fn blend_affine(
         &mut self,
-        source: &RgbaImage,
-        dst_x: i32,
-        dst_y: i32,
-        dst_w: u32,
-        dst_h: u32,
+        src_data: &[u8],
+        src_w: u32,
+        src_h: u32,
+        rect_x: f32,
+        rect_y: f32,
+        rect_w: f32,
+        rect_h: f32,
+        rotation_deg: f32,
+        rotate_center: bool,
+        distort: bool,
         opacity: f32,
     ) {
-        self.blend_raw(
-            source.as_raw(),
-            source.width(),
-            source.height(),
-            dst_x,
-            dst_y,
-            dst_w,
-            dst_h,
-            opacity,
-        );
-    }
+        if opacity <= 0.001 || rect_w <= 0.0 || rect_h <= 0.0 || src_w == 0 || src_h == 0 {
+            return;
+        }
 
-    /// Blend another framebuffer onto this framebuffer
-    pub fn blend_buffer(
-        &mut self,
-        source: &FrameBuffer,
-        dst_x: i32,
-        dst_y: i32,
-        dst_w: u32,
-        dst_h: u32,
-        opacity: f32,
-    ) {
-        self.blend_raw(
-            &source.data,
-            source.width,
-            source.height,
-            dst_x,
-            dst_y,
-            dst_w,
-            dst_h,
-            opacity,
-        );
+        // Fast path: axis-aligned (rotation == 0)
+        if rotation_deg.abs() <= 0.001 {
+            let (final_x, final_y, final_w, final_h) = if distort {
+                (rect_x, rect_y, rect_w, rect_h)
+            } else {
+                let src_aspect = src_w as f32 / src_h as f32;
+                let target_aspect = rect_w / rect_h;
+                let scale = if src_aspect >= target_aspect {
+                    rect_w / src_w as f32
+                } else {
+                    rect_h / src_h as f32
+                };
+                let draw_w = src_w as f32 * scale;
+                let draw_h = src_h as f32 * scale;
+                let fx = rect_x + (rect_w - draw_w) / 2.0;
+                let fy = rect_y + (rect_h - draw_h) / 2.0;
+                (fx, fy, draw_w, draw_h)
+            };
+
+            self.blend_raw(
+                src_data,
+                src_w,
+                src_h,
+                final_x.round() as i32,
+                final_y.round() as i32,
+                final_w.round().max(1.0) as u32,
+                final_h.round().max(1.0) as u32,
+                opacity,
+            );
+            return;
+        }
+
+        // General path: affine transform with rotation
+        let mut m = Affine2::from_translation(vec2(rect_x, rect_y));
+        let rad = rotation_deg.to_radians();
+        if rotate_center {
+            m = m * Affine2::from_translation(vec2(rect_w / 2.0, rect_h / 2.0));
+            m = m * Affine2::from_angle(rad);
+            m = m * Affine2::from_translation(vec2(-rect_w / 2.0, -rect_h / 2.0));
+        } else {
+            m = m * Affine2::from_angle(rad);
+        }
+
+        if distort {
+            m = m * Affine2::from_scale(vec2(rect_w / src_w as f32, rect_h / src_h as f32));
+        } else {
+            let src_aspect = src_w as f32 / src_h as f32;
+            let target_aspect = rect_w / rect_h;
+            let scale = if src_aspect >= target_aspect {
+                rect_w / src_w as f32
+            } else {
+                rect_h / src_h as f32
+            };
+            let draw_w = src_w as f32 * scale;
+            let draw_h = src_h as f32 * scale;
+            m = m * Affine2::from_translation(vec2((rect_w - draw_w) / 2.0, (rect_h - draw_h) / 2.0));
+            m = m * Affine2::from_scale(vec2(scale, scale));
+        }
+
+        let p0 = m.transform_point2(vec2(0.0, 0.0));
+        let p1 = m.transform_point2(vec2(src_w as f32, 0.0));
+        let p2 = m.transform_point2(vec2(src_w as f32, src_h as f32));
+        let p3 = m.transform_point2(vec2(0.0, src_h as f32));
+
+        let min_x = p0.x.min(p1.x).min(p2.x).min(p3.x).floor().max(0.0) as usize;
+        let max_x = p0.x.max(p1.x).max(p2.x).max(p3.x).ceil().min(self.width as f32) as usize;
+        let min_y = p0.y.min(p1.y).min(p2.y).min(p3.y).floor().max(0.0) as usize;
+        let max_y = p0.y.max(p1.y).max(p2.y).max(p3.y).ceil().min(self.height as f32) as usize;
+
+        if min_x >= max_x || min_y >= max_y {
+            return;
+        }
+
+        let inv = m.inverse();
+        let stride = (self.width as usize) * 4;
+        let src_stride = (src_w as usize) * 4;
+        let opacity_u32 = (opacity.clamp(0.0, 1.0) * 255.0).round() as u32;
+
+        let active_rows = &mut self.data[(min_y * stride)..(max_y * stride)];
+
+        active_rows
+            .par_chunks_exact_mut(stride)
+            .enumerate()
+            .for_each(|(row_idx, row)| {
+                let y = min_y + row_idx;
+                for x in min_x..max_x {
+                    let src_p = inv.transform_point2(vec2(x as f32 + 0.5, y as f32 + 0.5));
+                    if src_p.x < 0.0 || src_p.x >= (src_w as f32) || src_p.y < 0.0 || src_p.y >= (src_h as f32) {
+                        continue;
+                    }
+
+                    // Bilinear sampling
+                    let x0 = src_p.x.floor() as usize;
+                    let y0 = src_p.y.floor() as usize;
+                    let x1 = (x0 + 1).min(src_w as usize - 1);
+                    let y1 = (y0 + 1).min(src_h as usize - 1);
+                    let fx = src_p.x - x0 as f32;
+                    let fy = src_p.y - y0 as f32;
+                    let fx_u32 = (fx * 256.0) as u32;
+                    let fy_u32 = (fy * 256.0) as u32;
+                    let inv_fx = 256 - fx_u32;
+                    let inv_fy = 256 - fy_u32;
+
+                    let w00 = (inv_fx * inv_fy) >> 8;
+                    let w10 = (fx_u32 * inv_fy) >> 8;
+                    let w01 = (inv_fx * fy_u32) >> 8;
+                    let w11 = (fx_u32 * fy_u32) >> 8;
+
+                    let idx00 = y0 * src_stride + x0 * 4;
+                    let idx10 = y0 * src_stride + x1 * 4;
+                    let idx01 = y1 * src_stride + x0 * 4;
+                    let idx11 = y1 * src_stride + x1 * 4;
+
+                    let sa = (src_data[idx00 + 3] as u32 * w00
+                        + src_data[idx10 + 3] as u32 * w10
+                        + src_data[idx01 + 3] as u32 * w01
+                        + src_data[idx11 + 3] as u32 * w11) >> 8;
+
+                    let eff_a = (sa * opacity_u32 + 128) >> 8;
+                    if eff_a <= 1 {
+                        continue;
+                    }
+
+                    let sr = (src_data[idx00] as u32 * w00
+                        + src_data[idx10] as u32 * w10
+                        + src_data[idx01] as u32 * w01
+                        + src_data[idx11] as u32 * w11) >> 8;
+                    let sg = (src_data[idx00 + 1] as u32 * w00
+                        + src_data[idx10 + 1] as u32 * w10
+                        + src_data[idx01 + 1] as u32 * w01
+                        + src_data[idx11 + 1] as u32 * w11) >> 8;
+                    let sb = (src_data[idx00 + 2] as u32 * w00
+                        + src_data[idx10 + 2] as u32 * w10
+                        + src_data[idx01 + 2] as u32 * w01
+                        + src_data[idx11 + 2] as u32 * w11) >> 8;
+
+                    let d_idx = x * 4;
+                    if eff_a >= 254 {
+                        row[d_idx] = sr as u8;
+                        row[d_idx + 1] = sg as u8;
+                        row[d_idx + 2] = sb as u8;
+                        row[d_idx + 3] = 255;
+                    } else {
+                        let inv_a = 255 - eff_a;
+                        let dr = row[d_idx] as u32;
+                        let dg = row[d_idx + 1] as u32;
+                        let db = row[d_idx + 2] as u32;
+                        let da = row[d_idx + 3] as u32;
+
+                        row[d_idx] = ((sr * eff_a + dr * inv_a + 128) / 255) as u8;
+                        row[d_idx + 1] = ((sg * eff_a + dg * inv_a + 128) / 255) as u8;
+                        row[d_idx + 2] = ((sb * eff_a + db * inv_a + 128) / 255) as u8;
+                        row[d_idx + 3] = (eff_a + ((da * inv_a + 128) / 255)).min(255) as u8;
+                    }
+                }
+            });
     }
 
     /// Fill a rectangle with solid or transparent color

@@ -150,3 +150,40 @@ fn test_drop_shadow_placement() {
     let shadow_idx = (65 * 200 + 65) * 4;
     assert!(raw[shadow_idx] < 255, "Shadow should darken background around (65, 65)");
 }
+
+#[test]
+fn test_blend_affine_aspect_preservation_and_rotation() {
+    let mut fb = FrameBuffer::new(200, 200);
+    fb.clear([0, 0, 0, 255]); // Black canvas
+
+    // Create a 100x50 source (2:1 aspect ratio)
+    let mut img = RgbaImage::new(100, 50);
+    for p in img.pixels_mut() {
+        *p = Rgba([255, 255, 255, 255]);
+    }
+
+    // Blend into a 100x100 square rect with distort=false
+    // Expected: fits to width 100, height scaled to 50, centered vertically at y = 50 + (100-50)/2 = 75
+    fb.blend_affine(
+        img.as_raw(),
+        100,
+        50,
+        50.0,
+        50.0,
+        100.0,
+        100.0,
+        0.0,
+        false,
+        false, // distort = false
+        1.0,
+    );
+
+    let raw = fb.raw_bytes();
+    // Center of rectangle (100, 100) should be white
+    let center_idx = (100 * 200 + 100) * 4;
+    assert_eq!(raw[center_idx], 255);
+
+    // Top border of rect (100, 55) should be BLACK because image is centered vertically between 75 and 125
+    let top_idx = (55 * 200 + 100) * 4;
+    assert_eq!(raw[top_idx], 0, "Aspect preservation should center image vertically leaving top empty");
+}

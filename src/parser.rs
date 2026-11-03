@@ -70,7 +70,9 @@ impl KeyframeRect {
 pub enum FilterType {
     QtBlend {
         rect_keyframes: Vec<KeyframeRect>,
-        rotation: f32,
+        rotation_keyframes: Vec<(u64, f32)>,
+        rotate_center: bool,
+        distort: bool,
     },
     DropShadow {
         radius: f32,
@@ -241,6 +243,46 @@ impl MltProject {
             }
         }
         [0, 0, 0, 255]
+    }
+
+    pub fn parse_float_keyframes(s: &str, fps_num: u32, fps_den: u32) -> Vec<(u64, f32)> {
+        let mut kfs = Vec::new();
+        for part in s.split(';') {
+            let part = part.trim();
+            if part.is_empty() { continue; }
+            let mut pieces = part.split('=');
+            let time_part = pieces.next().unwrap_or("0").trim_end_matches('|');
+            let frame = Self::parse_time_str(time_part, fps_num, fps_den);
+            if let Some(val_str) = pieces.next() {
+                if let Ok(v) = val_str.trim().parse::<f32>() {
+                    kfs.push((frame, v));
+                }
+            }
+        }
+        if kfs.is_empty() {
+            if let Ok(v) = s.trim().parse::<f32>() {
+                kfs.push((0, v));
+            }
+        }
+        kfs.sort_by_key(|k| k.0);
+        kfs
+    }
+
+    pub fn interpolate_float(kfs: &[(u64, f32)], frame: u64) -> f32 {
+        if kfs.is_empty() { return 0.0; }
+        if kfs.len() == 1 || frame <= kfs[0].0 { return kfs[0].1; }
+        let last = &kfs[kfs.len() - 1];
+        if frame >= last.0 { return last.1; }
+        for i in 0..kfs.len() - 1 {
+            let (f0, v0) = kfs[i];
+            let (f1, v1) = kfs[i + 1];
+            if frame >= f0 && frame <= f1 {
+                let span = (f1 - f0) as f32;
+                let factor = if span > 0.0 { (frame - f0) as f32 / span } else { 0.0 };
+                return v0 + factor * (v1 - v0);
+            }
+        }
+        last.1
     }
 
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
@@ -498,6 +540,9 @@ impl MltProject {
             let id = child.attribute("id").unwrap_or("").to_string();
             let mut service = String::new();
             let mut rect_str = String::new();
+            let mut rotation_str = String::new();
+            let mut rotate_center = false;
+            let mut distort = false;
             let mut radius_str = String::new();
             let mut sigma_str = String::new();
             let mut color_str = String::new();
@@ -514,6 +559,9 @@ impl MltProject {
                         "disable" if val == "1" => disabled = true,
                         "mlt_service" => service = val.to_string(),
                         "rect" => rect_str = val.to_string(),
+                        "rotation" => rotation_str = val.to_string(),
+                        "rotate_center" => rotate_center = val == "1",
+                        "distort" => distort = val == "1",
                         "radius" => radius_str = val.to_string(),
                         "sigma" | "av.sigma" => sigma_str = val.to_string(),
                         "color" => color_str = val.to_string(),
@@ -532,9 +580,12 @@ impl MltProject {
 
             let filter_type = if service == "qtblend" {
                 let keyframes = Self::parse_rect_keyframes(&rect_str, fps_num, fps_den);
+                let rotation_kfs = Self::parse_float_keyframes(&rotation_str, fps_num, fps_den);
                 FilterType::QtBlend {
                     rect_keyframes: keyframes,
-                    rotation: 0.0,
+                    rotation_keyframes: rotation_kfs,
+                    rotate_center,
+                    distort,
                 }
             } else if service == "dropshadow" {
                 let radius = radius_str.split('=').last().unwrap_or("20").parse().unwrap_or(20.0);
