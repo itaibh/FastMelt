@@ -1,7 +1,8 @@
 [package]
 name = "olive-mlt-bridge"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
+
 authors = ["Itai Bar-Haim", "Antigravity"]
 description = "A high-performance GPU-accelerated drop-in replacement for MLT and melt in Kdenlive"
 

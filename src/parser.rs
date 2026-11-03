@@ -231,9 +231,37 @@ impl MltProject {
                         });
                     }
                 }
+                "consumer" => {
+                    let mut target = node.attribute("target").unwrap_or("").to_string();
+                    let mut vcodec = String::new();
+                    let mut acodec = String::new();
+                    let mut extra_args = HashMap::new();
+
+                    for prop in node.children().filter(|c| c.tag_name().name() == "property") {
+                        if let Some(name) = prop.attribute("name") {
+                            let val = prop.text().unwrap_or("").trim().to_string();
+                            match name {
+                                "target" if target.is_empty() => target = val,
+                                "vcodec" => vcodec = val,
+                                "acodec" => acodec = val,
+                                _ => {
+                                    extra_args.insert(name.to_string(), val);
+                                }
+                            }
+                        }
+                    }
+
+                    project.consumer = Some(Consumer {
+                        target,
+                        vcodec,
+                        acodec,
+                        extra_args,
+                    });
+                }
                 _ => {}
             }
         }
+
 
         Ok(project)
     }

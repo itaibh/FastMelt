@@ -10,7 +10,10 @@ pub use logger::{get_log_paths, log_msg};
 pub use parser::MltProject;
 pub use pipeline::FrameBuffer;
 
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub fn initialize() {
-    logger::log_msg("CORE", "OliveMltBridge core initialized");
+    logger::log_msg("CORE", &format!("OliveMltBridge core initialized (v{})", VERSION));
 }
+
 

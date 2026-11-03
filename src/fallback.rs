@@ -41,18 +41,34 @@ impl UpstreamMlt {
             "/usr/bin/melt-7",
             "/var/lib/flatpak/app/org.kde.kdenlive/current/active/files/bin/melt",
             "/usr/bin/melt",
-            "/app/bin/melt",
         ];
 
+        let current_exe = std::env::current_exe().ok();
         let binary = stock_melt_candidates
             .iter()
-            .find(|p| std::path::Path::new(p).exists())
-            .unwrap_or(&"/usr/bin/melt");
+            .find(|p| {
+                let path = std::path::Path::new(p);
+                if !path.exists() {
+                    return false;
+                }
+                if let (Ok(canonical), Some(curr)) = (path.canonicalize(), &current_exe) {
+                    if let Ok(curr_canonical) = curr.canonicalize() {
+                        if canonical == curr_canonical {
+                            return false; // Don't call ourselves recursively!
+                        }
+                    }
+                }
+                true
+            })
+            .unwrap_or(&"/app/bin/melt-7");
 
-        log_msg("FALLBACK", &format!("Delegating unaccelerated job to upstream binary: {} with args: {:?}", binary, args));
+        log_msg("FALLBACK", &format!("Delegating rendering job to upstream binary: {} with args: {:?}", binary, args));
 
         let mut child = Command::new(binary)
             .args(args)
+            .stdin(std::process::Stdio::inherit())
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
             .spawn()?;
 
         let status = child.wait()?;
@@ -60,5 +76,6 @@ impl UpstreamMlt {
         log_msg("FALLBACK", &format!("Upstream binary {} exited with code: {}", binary, code));
         Ok(code)
     }
+
 }
 
