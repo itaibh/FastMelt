@@ -1,5 +1,5 @@
+use crate::logger::log_msg;
 use libloading::Library;
-use log::{info, warn};
 use std::process::Command;
 
 pub struct UpstreamMlt {
@@ -22,14 +22,14 @@ impl UpstreamMlt {
             if std::path::Path::new(path).exists() {
                 unsafe {
                     if let Ok(lib) = Library::new(path) {
-                        info!("Successfully dynamically loaded upstream MLT from: {}", path);
+                        log_msg("FALLBACK", &format!("Successfully dynamically loaded upstream MLT from: {}", path));
                         return Self { _lib: Some(lib) };
                     }
                 }
             }
         }
 
-        warn!("Could not locate upstream libmlt-7.so. Fallback will use CLI delegate.");
+        log_msg("FALLBACK", "Could not locate upstream libmlt-7.so. Fallback will use CLI delegate.");
         Self { _lib: None }
     }
 
@@ -49,13 +49,16 @@ impl UpstreamMlt {
             .find(|p| std::path::Path::new(p).exists())
             .unwrap_or(&"/usr/bin/melt");
 
-        info!("Delegating unaccelerated job to upstream binary: {}", binary);
+        log_msg("FALLBACK", &format!("Delegating unaccelerated job to upstream binary: {} with args: {:?}", binary, args));
 
         let mut child = Command::new(binary)
             .args(args)
             .spawn()?;
 
         let status = child.wait()?;
-        Ok(status.code().unwrap_or(1))
+        let code = status.code().unwrap_or(1);
+        log_msg("FALLBACK", &format!("Upstream binary {} exited with code: {}", binary, code));
+        Ok(code)
     }
 }
+
