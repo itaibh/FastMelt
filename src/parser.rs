@@ -1,5 +1,6 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use roxmltree::Document;
 
 #[derive(Debug, Clone)]
 pub struct Profile {
@@ -75,26 +76,30 @@ pub enum FilterType {
         radius: f32,
         x_offset: f32,
         y_offset: f32,
-        color: u32, // RGBA
+        color: u32,
     },
     GaussianBlur {
         sigma: f32,
     },
+    Tint {
+        color: [u8; 4],
+        amount: f32,
+    },
+    HorizontalFlip,
     Passthrough(String),
 }
 
 #[derive(Debug, Clone)]
 pub struct Filter {
     pub id: String,
-    pub service: String,
     pub filter_type: FilterType,
 }
 
 #[derive(Debug, Clone)]
 pub enum ProducerSource {
     Image(PathBuf),
+    Color([u8; 4]),
     Video(PathBuf),
-    Color(u32),
     NestedTractor(String),
 }
 
@@ -124,6 +129,7 @@ pub struct PlaylistEntry {
 pub struct Playlist {
     pub id: String,
     pub items: Vec<PlaylistItem>,
+    pub is_audio: bool,
 }
 
 impl Playlist {
@@ -144,8 +150,8 @@ impl Playlist {
                         1
                     };
                     if timeline_frame >= current_frame && timeline_frame < current_frame + duration {
-                        let local_offset = timeline_frame - current_frame;
-                        let clip_frame = entry.in_frame + local_offset;
+                        let offset = timeline_frame - current_frame;
+                        let clip_frame = entry.in_frame + offset;
                         return Some((entry, clip_frame));
                     }
                     current_frame += duration;
@@ -169,6 +175,7 @@ pub struct Tractor {
     pub out_frame: u64,
     pub tracks: Vec<Track>,
     pub filters: Vec<Filter>,
+    pub is_audio: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -179,51 +186,90 @@ pub struct Consumer {
     pub extra_args: HashMap<String, String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct MltProject {
-    pub root_dir: Option<PathBuf>,
     pub profile: Profile,
+    pub root_tractor_id: Option<String>,
     pub producers: HashMap<String, Producer>,
     pub playlists: HashMap<String, Playlist>,
     pub tractors: HashMap<String, Tractor>,
-    pub root_tractor_id: Option<String>,
     pub consumer: Option<Consumer>,
+    pub root_dir: Option<PathBuf>,
 }
 
 impl MltProject {
-    pub fn parse(xml_content: &str) -> Result<Self, String> {
-        let doc = roxmltree::Document::parse(xml_content)
-            .map_err(|e| format!("Failed to parse XML: {}", e))?;
+    pub fn parse_color_str(s: &str) -> [u8; 4] {
+        let s = s.trim();
+        if s == "0" || s.eq_ignore_ascii_case("transparent") || s.eq_ignore_ascii_case("#00000000") {
+            return [0, 0, 0, 0];
+        }
+        if s.eq_ignore_ascii_case("black") {
+            return [0, 0, 0, 255];
+        }
+        if s.eq_ignore_ascii_case("white") {
+            return [255, 255, 255, 255];
+        }
+        if let Some(hex) = s.strip_prefix("0x") {
+            if let Ok(val) = u32::from_str_radix(hex, 16) {
+                return [
+                    ((val >> 24) & 0xFF) as u8,
+                    ((val >> 16) & 0xFF) as u8,
+                    ((val >> 8) & 0xFF) as u8,
+                    (val & 0xFF) as u8,
+                ];
+            }
+        }
+        if let Some(hex) = s.strip_prefix("#") {
+            if hex.len() == 6 {
+                if let Ok(val) = u32::from_str_radix(hex, 16) {
+                    return [
+                        ((val >> 16) & 0xFF) as u8,
+                        ((val >> 8) & 0xFF) as u8,
+                        (val & 0xFF) as u8,
+                        255,
+                    ];
+                }
+            } else if hex.len() == 8 {
+                if let Ok(val) = u32::from_str_radix(hex, 16) {
+                    return [
+                        ((val >> 24) & 0xFF) as u8,
+                        ((val >> 16) & 0xFF) as u8,
+                        ((val >> 8) & 0xFF) as u8,
+                        (val & 0xFF) as u8,
+                    ];
+                }
+            }
+        }
+        [0, 0, 0, 255]
+    }
 
-        let root_dir = doc.root_element().attribute("root").map(PathBuf::from);
+    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
+        let content = std::fs::read_to_string(&path)?;
+        let mut proj = Self::parse_xml(&content)?;
+        if let Some(parent) = path.as_ref().parent() {
+            proj.root_dir = Some(parent.to_path_buf());
+        }
+        Ok(proj)
+    }
 
-        let mut project = MltProject {
-            root_dir,
-            profile: Profile::default(),
-            producers: HashMap::new(),
-            playlists: HashMap::new(),
-            tractors: HashMap::new(),
-            root_tractor_id: None,
-            consumer: None,
-        };
+    pub fn parse(xml_content: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::parse_xml(xml_content)
+    }
 
+    pub fn parse_xml(xml_content: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        let doc = Document::parse(xml_content)?;
+        let mut project = MltProject::default();
         let mut last_tractor_id = None;
 
         for node in doc.descendants() {
             match node.tag_name().name() {
                 "profile" => {
-                    let w = node.attribute("width").and_then(|v| v.parse().ok()).unwrap_or(1080);
-                    let h = node.attribute("height").and_then(|v| v.parse().ok()).unwrap_or(1920);
-                    let fr_num = node.attribute("frame_rate_num").and_then(|v| v.parse().ok()).unwrap_or(25);
-                    let fr_den = node.attribute("frame_rate_den").and_then(|v| v.parse().ok()).unwrap_or(1);
-                    project.profile = Profile {
-                        width: w,
-                        height: h,
-                        frame_rate_num: fr_num,
-                        frame_rate_den: fr_den,
-                        display_aspect_num: 9,
-                        display_aspect_den: 16,
-                    };
+                    project.profile.width = node.attribute("width").and_then(|v| v.parse().ok()).unwrap_or(1080);
+                    project.profile.height = node.attribute("height").and_then(|v| v.parse().ok()).unwrap_or(1920);
+                    project.profile.frame_rate_num = node.attribute("frame_rate_num").and_then(|v| v.parse().ok()).unwrap_or(25);
+                    project.profile.frame_rate_den = node.attribute("frame_rate_den").and_then(|v| v.parse().ok()).unwrap_or(1);
+                    project.profile.display_aspect_num = node.attribute("display_aspect_num").and_then(|v| v.parse().ok()).unwrap_or(9);
+                    project.profile.display_aspect_den = node.attribute("display_aspect_den").and_then(|v| v.parse().ok()).unwrap_or(16);
                 }
                 "producer" => {
                     if let Some(id) = node.attribute("id") {
@@ -241,10 +287,15 @@ impl MltProject {
                             }
                         }
 
-                        let source = if service == "qimage" || resource.ends_with(".png") || resource.ends_with(".jpg") {
+                        let is_image = service == "qimage"
+                            || resource.ends_with(".png")
+                            || resource.ends_with(".jpg")
+                            || resource.ends_with(".jpeg");
+
+                        let source = if is_image {
                             ProducerSource::Image(PathBuf::from(resource))
                         } else if service == "color" {
-                            ProducerSource::Color(0xFF000000)
+                            ProducerSource::Color(Self::parse_color_str(&resource))
                         } else {
                             ProducerSource::Video(PathBuf::from(resource))
                         };
@@ -262,34 +313,48 @@ impl MltProject {
                 "playlist" => {
                     if let Some(id) = node.attribute("id") {
                         let mut items = Vec::new();
+                        let mut is_audio = false;
+
+                        for prop in node.children().filter(|c| c.tag_name().name() == "property") {
+                            if prop.attribute("name") == Some("kdenlive:audio_track") && prop.text().unwrap_or("").trim() == "1" {
+                                is_audio = true;
+                            }
+                        }
+
                         for child in node.children() {
-                            if child.tag_name().name() == "entry" {
-                                let producer_id = child.attribute("producer").unwrap_or("").to_string();
-                                let in_frame = child.attribute("in")
-                                    .map(|s| Self::parse_time_str(s, project.profile.frame_rate_num, project.profile.frame_rate_den))
-                                    .unwrap_or(0);
-                                let out_frame = child.attribute("out")
-                                    .map(|s| Self::parse_time_str(s, project.profile.frame_rate_num, project.profile.frame_rate_den))
-                                    .unwrap_or(in_frame);
-                                let filters = Self::parse_filters(child, project.profile.frame_rate_num, project.profile.frame_rate_den);
-                                items.push(PlaylistItem::Entry(PlaylistEntry {
-                                    producer_id,
-                                    in_frame,
-                                    out_frame,
-                                    filters,
-                                }));
-                            } else if child.tag_name().name() == "blank" {
-                                let length = child.attribute("length")
-                                    .map(|s| Self::parse_time_str(s, project.profile.frame_rate_num, project.profile.frame_rate_den))
-                                    .unwrap_or(0);
-                                if length > 0 {
-                                    items.push(PlaylistItem::Blank(length));
+                            match child.tag_name().name() {
+                                "blank" => {
+                                    let length = child.attribute("length")
+                                        .map(|s| Self::parse_time_str(s, project.profile.frame_rate_num, project.profile.frame_rate_den))
+                                        .unwrap_or(0);
+                                    if length > 0 {
+                                        items.push(PlaylistItem::Blank(length));
+                                    }
                                 }
+                                "entry" => {
+                                    let producer_id = child.attribute("producer").unwrap_or("").to_string();
+                                    let in_frame = child.attribute("in")
+                                        .map(|s| Self::parse_time_str(s, project.profile.frame_rate_num, project.profile.frame_rate_den))
+                                        .unwrap_or(0);
+                                    let out_frame = child.attribute("out")
+                                        .map(|s| Self::parse_time_str(s, project.profile.frame_rate_num, project.profile.frame_rate_den))
+                                        .unwrap_or(0);
+                                    let filters = Self::parse_filters(child, project.profile.frame_rate_num, project.profile.frame_rate_den);
+
+                                    items.push(PlaylistItem::Entry(PlaylistEntry {
+                                        producer_id,
+                                        in_frame,
+                                        out_frame,
+                                        filters,
+                                    }));
+                                }
+                                _ => {}
                             }
                         }
                         project.playlists.insert(id.to_string(), Playlist {
                             id: id.to_string(),
                             items,
+                            is_audio,
                         });
                     }
                 }
@@ -311,11 +376,14 @@ impl MltProject {
                             }
                         }
                         let filters = Self::parse_filters(node, project.profile.frame_rate_num, project.profile.frame_rate_den);
-                        
-                        // Check if it's the root project tractor
+                        let mut is_audio = false;
+
+                        // Check properties
                         for prop in node.children().filter(|c| c.tag_name().name() == "property") {
                             if prop.attribute("name") == Some("kdenlive:projectTractor") {
                                 project.root_tractor_id = Some(id.to_string());
+                            } else if prop.attribute("name") == Some("kdenlive:audio_track") && prop.text().unwrap_or("").trim() == "1" {
+                                is_audio = true;
                             }
                         }
 
@@ -327,6 +395,7 @@ impl MltProject {
                             out_frame,
                             tracks,
                             filters,
+                            is_audio,
                         });
                     }
                 }
@@ -361,7 +430,6 @@ impl MltProject {
             }
         }
 
-
         if project.root_tractor_id.is_none() {
             project.root_tractor_id = last_tractor_id;
         }
@@ -381,7 +449,6 @@ impl MltProject {
         let colon_parts: Vec<&str> = s.split(':').collect();
         match colon_parts.len() {
             3 => {
-                // HH:MM:SS or HH:MM:SS.mmm
                 let h: f64 = colon_parts[0].parse().unwrap_or(0.0);
                 let m: f64 = colon_parts[1].parse().unwrap_or(0.0);
                 let s_val: f64 = colon_parts[2].parse().unwrap_or(0.0);
@@ -389,7 +456,6 @@ impl MltProject {
                 (total_sec * fps).round() as u64
             }
             4 => {
-                // HH:MM:SS:FF
                 let h: u64 = colon_parts[0].parse().unwrap_or(0);
                 let m: u64 = colon_parts[1].parse().unwrap_or(0);
                 let s_val: u64 = colon_parts[2].parse().unwrap_or(0);
@@ -433,7 +499,10 @@ impl MltProject {
             let mut service = String::new();
             let mut rect_str = String::new();
             let mut radius_str = String::new();
+            let mut sigma_str = String::new();
             let mut color_str = String::new();
+            let mut tint_color_str = String::new();
+            let mut tint_amount_str = String::new();
             let mut x_str = String::new();
             let mut y_str = String::new();
             let mut disabled = false;
@@ -446,7 +515,10 @@ impl MltProject {
                         "mlt_service" => service = val.to_string(),
                         "rect" => rect_str = val.to_string(),
                         "radius" => radius_str = val.to_string(),
+                        "sigma" | "av.sigma" => sigma_str = val.to_string(),
                         "color" => color_str = val.to_string(),
+                        "Map white to" | "Map black to" => tint_color_str = val.to_string(),
+                        "Tint amount" => tint_amount_str = val.to_string(),
                         "x" => x_str = val.to_string(),
                         "y" => y_str = val.to_string(),
                         _ => {}
@@ -480,8 +552,20 @@ impl MltProject {
                     y_offset,
                     color,
                 }
+            } else if service == "frei0r.tint0r" {
+                let raw_c = tint_color_str.split('=').last().unwrap_or("0x000000ff").trim();
+                let color = Self::parse_color_str(raw_c);
+                let amount = tint_amount_str.split('=').last().unwrap_or("1.0").trim().parse().unwrap_or(1.0);
+                FilterType::Tint { color, amount }
+            } else if service == "avfilter.hflip" {
+                FilterType::HorizontalFlip
             } else if service.contains("gblur") {
-                let sigma = radius_str.split('=').last().unwrap_or("5").parse().unwrap_or(5.0);
+                let s_str = if !sigma_str.is_empty() {
+                    &sigma_str
+                } else {
+                    &radius_str
+                };
+                let sigma = s_str.split('=').last().unwrap_or("5.0").trim().parse().unwrap_or(5.0);
                 FilterType::GaussianBlur { sigma }
             } else {
                 FilterType::Passthrough(service.clone())
@@ -489,7 +573,6 @@ impl MltProject {
 
             filters.push(Filter {
                 id,
-                service,
                 filter_type,
             });
         }
@@ -513,7 +596,7 @@ impl MltProject {
                         y: nums[1],
                         w: nums[2],
                         h: nums[3],
-                        opacity: if nums.len() > 4 { nums[4] } else { 1.0 },
+                        opacity: if nums.len() >= 5 { nums[4] } else { 1.0 },
                     });
                 }
             }

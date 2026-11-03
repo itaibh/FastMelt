@@ -51,6 +51,7 @@ fn test_playlist_active_clip_resolution() {
                 filters: vec![],
             }),
         ],
+        is_audio: false,
     };
 
     // Frame 5: Inside blank

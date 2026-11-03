@@ -233,6 +233,10 @@ fn main() {
                         let fps = if elapsed > 0.001 { (frame as f64) / elapsed } else { 0.0 };
 
                         if progress_mode {
+                            let pct = if total_frames > 0 { ((frame as f64 / total_frames as f64) * 100.0).round() as u64 } else { 0 };
+                            eprintln!("Current Frame: {:10}, percentage: {:10}", frame, pct);
+                            let _ = io::stderr().flush();
+
                             println!("{}\t{}\t{}", frame, fps.round() as u64, elapsed.round() as u64);
                             let _ = io::stdout().flush();
                         }

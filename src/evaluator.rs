@@ -32,6 +32,11 @@ impl<'a> TimelineEvaluator<'a> {
             None => return,
         };
 
+        // Skip audio tractors completely during video render pass
+        if tractor.is_audio {
+            return;
+        }
+
         // If frame is out of bounds for this tractor
         if frame < tractor.in_frame || (tractor.out_frame > tractor.in_frame && frame > tractor.out_frame) {
             return;
@@ -50,11 +55,15 @@ impl<'a> TimelineEvaluator<'a> {
             // Track can point to:
             // 1. A Playlist
             if let Some(playlist) = self.project.playlists.get(prod_id) {
-                self.render_playlist(playlist, frame, fb, depth);
+                if !playlist.is_audio {
+                    self.render_playlist(playlist, frame, fb, depth);
+                }
             }
             // 2. Another Tractor directly
-            else if self.project.tractors.contains_key(prod_id) {
-                self.render_tractor(prod_id, frame, fb, depth + 1);
+            else if let Some(sub_tractor) = self.project.tractors.get(prod_id) {
+                if !sub_tractor.is_audio {
+                    self.render_tractor(prod_id, frame, fb, depth + 1);
+                }
             }
             // 3. A Producer directly
             else if let Some(producer) = self.project.producers.get(prod_id) {
@@ -64,11 +73,19 @@ impl<'a> TimelineEvaluator<'a> {
     }
 
     fn render_playlist(&mut self, playlist: &Playlist, timeline_frame: u64, fb: &mut FrameBuffer, depth: u32) {
+        if playlist.is_audio {
+            return;
+        }
+
         if let Some((entry, clip_frame)) = playlist.get_active_clip_at(timeline_frame) {
             let prod_id = &entry.producer_id;
 
             // Check if entry points to a tractor
-            if self.project.tractors.contains_key(prod_id) {
+            if let Some(sub_tractor) = self.project.tractors.get(prod_id) {
+                if sub_tractor.is_audio {
+                    return;
+                }
+
                 // If the entry has transform filters (qtblend)
                 let qtblend_opt = entry.filters.iter().find_map(|f| {
                     if let FilterType::QtBlend { ref rect_keyframes, .. } = f.filter_type {
@@ -103,7 +120,7 @@ impl<'a> TimelineEvaluator<'a> {
         fb: &mut FrameBuffer,
         depth: u32,
     ) {
-        let (rect_keyframes, drop_shadow, gaussian_blur) = self.collect_filters(producer, extra_filters);
+        let (rect_keyframes, drop_shadow, gaussian_blur, tint, hflip) = self.collect_filters(producer, extra_filters);
 
         let (x, y, w, h, opacity) = if let Some(kfs) = rect_keyframes {
             KeyframeRect::interpolate(kfs, clip_frame)
@@ -114,7 +131,10 @@ impl<'a> TimelineEvaluator<'a> {
         match &producer.source {
             ProducerSource::Image(rel_or_abs_path) => {
                 let resolved_path = self.resolve_path(rel_or_abs_path);
-                if let Some(img) = self.cache.get_or_load(&resolved_path).cloned() {
+                let tint_opt = tint.map(|(c, _)| c);
+                let sigma_val = gaussian_blur.unwrap_or(0.0);
+
+                if let Some(img) = self.cache.get_or_load_processed(&resolved_path, tint_opt, sigma_val, hflip).cloned() {
                     // 1. Drop shadow is rendered behind the image at (x + x_off, y + y_off)
                     if let Some((radius, x_off, y_off, color)) = drop_shadow {
                         fb.render_drop_shadow(
@@ -129,28 +149,22 @@ impl<'a> TimelineEvaluator<'a> {
                         );
                     }
 
-                    // 2. Blend image (use pre-cached blurred texture if Gaussian blur filter is present)
-                    if let Some(sigma) = gaussian_blur {
-                        if let Some(blurred_img) = self.cache.get_or_load_blurred(&resolved_path, sigma) {
-                            fb.blend_layer(blurred_img, x as i32, y as i32, w as u32, h as u32, opacity);
-                        } else {
-                            fb.blend_layer(&img, x as i32, y as i32, w as u32, h as u32, opacity);
-                        }
-                    } else {
-                        fb.blend_layer(&img, x as i32, y as i32, w as u32, h as u32, opacity);
-                    }
+                    // 2. Blend processed image
+                    fb.blend_layer(&img, x as i32, y as i32, w as u32, h as u32, opacity);
                 }
             }
             ProducerSource::Color(color) => {
-                let r = ((color >> 24) & 0xFF) as u8;
-                let g = ((color >> 16) & 0xFF) as u8;
-                let b = ((color >> 8) & 0xFF) as u8;
-                let a = (((color & 0xFF) as f32 / 255.0) * opacity * 255.0).round().clamp(0.0, 255.0) as u8;
+                if color[3] == 0 {
+                    // Completely transparent base track - do not clear or paint!
+                    return;
+                }
+                let a = (((color[3] as f32 / 255.0) * opacity * 255.0)).round().clamp(0.0, 255.0) as u8;
+                let c = [color[0], color[1], color[2], a];
 
-                if opacity >= 0.99 && x <= 0.0 && y <= 0.0 && w >= fb.width as f32 && h >= fb.height as f32 {
-                    fb.clear([r, g, b, 255]);
+                if opacity >= 0.99 && a == 255 && x <= 0.0 && y <= 0.0 && w >= fb.width as f32 && h >= fb.height as f32 {
+                    fb.clear(c);
                 } else {
-                    fb.fill_rect(x as i32, y as i32, w as u32, h as u32, [r, g, b, a]);
+                    fb.fill_rect(x as i32, y as i32, w as u32, h as u32, c);
                 }
             }
             ProducerSource::NestedTractor(tid) => {
@@ -170,10 +184,14 @@ impl<'a> TimelineEvaluator<'a> {
         Option<&'b Vec<KeyframeRect>>,
         Option<(f32, f32, f32, u32)>, // drop shadow: (radius, x_off, y_off, color)
         Option<f32>,                  // blur: sigma
+        Option<([u8; 4], f32)>,       // tint: (color, amount)
+        bool,                         // hflip
     ) {
         let mut kfs = None;
         let mut shadow = None;
         let mut blur = None;
+        let mut tint = None;
+        let mut hflip = false;
 
         let all_filters = extra_filters.into_iter().flatten().chain(producer.filters.iter());
 
@@ -194,11 +212,19 @@ impl<'a> TimelineEvaluator<'a> {
                         blur = Some(*sigma);
                     }
                 }
+                FilterType::Tint { color, amount } => {
+                    if tint.is_none() {
+                        tint = Some((*color, *amount));
+                    }
+                }
+                FilterType::HorizontalFlip => {
+                    hflip = true;
+                }
                 _ => {}
             }
         }
 
-        (kfs, shadow, blur)
+        (kfs, shadow, blur, tint, hflip)
     }
 
     fn resolve_path(&self, p: &std::path::Path) -> PathBuf {
