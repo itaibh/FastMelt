@@ -282,8 +282,6 @@ impl<'a> TimelineEvaluator<'a> {
                         None => (m1, prod_opacity * entry_opacity),
                     };
 
-                    crate::logger::log_msg("COMPOSITE", &format!("producer: {} ({}x{}) m1: {:?} entry: {:?} comp: {:?}", producer.id, src_w, src_h, m1, entry_matrix, composite_matrix));
-
                     // 4. Render drop shadow if present
                     if let Some((radius, x_off, y_off, color)) = drop_shadow {
                         // Drop shadow geometry using affine bounds

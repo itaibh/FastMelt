@@ -33,13 +33,13 @@ impl UpstreamMlt {
         Self { _lib: None }
     }
 
-    /// Delegate entire rendering to the stock upstream melt binary if needed
-    pub fn delegate_to_stock_melt(args: &[String]) -> std::io::Result<i32> {
+    /// Create a Command that invokes upstream stock melt (either native binary or via flatpak run)
+    pub fn create_stock_melt_command(args: &[String]) -> Command {
         let stock_melt_candidates = [
+            "/app/bin/melt-7.stock",
+            "/app/bin/melt-7.real",
             "/app/bin/melt-7",
-            "/var/lib/flatpak/app/org.kde.kdenlive/current/active/files/bin/melt-7",
             "/usr/bin/melt-7",
-            "/var/lib/flatpak/app/org.kde.kdenlive/current/active/files/bin/melt",
             "/usr/bin/melt",
         ];
 
@@ -60,12 +60,30 @@ impl UpstreamMlt {
                 }
                 true
             })
-            .unwrap_or(&"/app/bin/melt-7");
+            .copied();
 
-        log_msg("FALLBACK", &format!("Delegating rendering job to upstream binary: {} with args: {:?}", binary, args));
+        if let Some(bin) = binary {
+            let mut cmd = Command::new(bin);
+            cmd.args(args);
+            cmd
+        } else {
+            // Fallback for host development: invoke via flatpak melt-7
+            let mut cmd = Command::new("flatpak");
+            cmd.arg("run")
+                .arg("--filesystem=/tmp")
+                .arg("--command=melt-7")
+                .arg("org.kde.kdenlive")
+                .args(args);
+            cmd
+        }
+    }
 
-        let mut child = Command::new(binary)
-            .args(args)
+    /// Delegate entire rendering to the stock upstream melt binary if needed
+    pub fn delegate_to_stock_melt(args: &[String]) -> std::io::Result<i32> {
+        let mut cmd = Self::create_stock_melt_command(args);
+        log_msg("FALLBACK", &format!("Delegating rendering job to upstream: {:?} with args: {:?}", cmd.get_program(), args));
+
+        let mut child = cmd
             .stdin(std::process::Stdio::inherit())
             .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit())
@@ -73,7 +91,7 @@ impl UpstreamMlt {
 
         let status = child.wait()?;
         let code = status.code().unwrap_or(1);
-        log_msg("FALLBACK", &format!("Upstream binary {} exited with code: {}", binary, code));
+        log_msg("FALLBACK", &format!("Upstream exited with code: {}", code));
         Ok(code)
     }
 

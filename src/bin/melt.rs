@@ -209,7 +209,38 @@ fn main() {
 
             let sub_file = proj.get_subtitle_file();
 
-            match HardwareEncoder::new(width, height, fps_num, fps_den, target, sub_file.as_deref()) {
+            // Check if project has audio tracks to render
+            let has_audio = mlt_7::audio::has_audio_content(proj);
+
+            let (video_encode_target, audio_thread) = if has_audio {
+                let temp_video = format!("{}.video.tmp.mp4", target);
+                let temp_audio_wav = format!("{}.audio.tmp.wav", target);
+                let temp_audio_xml = format!("{}.audio_proj.kdenlive", target);
+
+                let audio_thread_handle = if let Some(audio_xml) = mlt_7::audio::generate_audio_only_xml(&xml_content) {
+                    if fs::write(&temp_audio_xml, audio_xml).is_ok() {
+                        let xml_path_clone = temp_audio_xml.clone();
+                        let wav_path_clone = temp_audio_wav.clone();
+                        let start_f = start_frame;
+                        let end_f = end_frame;
+                        Some(std::thread::spawn(move || {
+                            let res = mlt_7::audio::render_audio_pass(&xml_path_clone, start_f, end_f, &wav_path_clone);
+                            let _ = fs::remove_file(&xml_path_clone);
+                            res
+                        }))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                (temp_video, Some((temp_audio_wav, audio_thread_handle)))
+            } else {
+                (target.clone(), None)
+            };
+
+            match HardwareEncoder::new(width, height, fps_num, fps_den, &video_encode_target, sub_file.as_deref()) {
                 Ok(mut encoder) => {
                     let mut cache = TextureCache::new();
                     let mut evaluator = TimelineEvaluator::new(proj, &mut cache);
@@ -243,6 +274,31 @@ fn main() {
                     if render_success {
                         match encoder.finish() {
                             Ok(code) => {
+                                // If audio was rendered concurrently, mux video and audio together
+                                if let Some((temp_audio_wav, audio_handle_opt)) = audio_thread {
+                                    if let Some(handle) = audio_handle_opt {
+                                        let _ = handle.join();
+                                    }
+
+                                    let audio_exists = std::path::Path::new(&temp_audio_wav).exists()
+                                        && fs::metadata(&temp_audio_wav).map(|m| m.len() > 0).unwrap_or(false);
+
+                                    if audio_exists {
+                                        log_msg("MELT", "Muxing hardware video with rendered audio track...");
+                                        let mux_code = mlt_7::audio::mux_video_audio(&video_encode_target, &temp_audio_wav, target)
+                                            .unwrap_or(1);
+                                        let _ = fs::remove_file(&video_encode_target);
+                                        let _ = fs::remove_file(&temp_audio_wav);
+                                        if mux_code != 0 {
+                                            log_msg("MELT", &format!("Warning: FFmpeg mux returned code {}", mux_code));
+                                        }
+                                    } else {
+                                        log_msg("MELT", "No audio track generated; renaming raw video to target...");
+                                        let _ = fs::rename(&video_encode_target, target);
+                                        let _ = fs::remove_file(&temp_audio_wav);
+                                    }
+                                }
+
                                 let total_time = start_time.elapsed().as_secs_f64();
                                 let avg_fps = if total_time > 0.001 { (total_frames as f64) / total_time } else { 0.0 };
                                 log_msg("MELT", &format!(

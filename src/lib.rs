@@ -1,4 +1,5 @@
 pub mod abi;
+pub mod audio;
 pub mod cache;
 pub mod encoder;
 pub mod evaluator;
@@ -8,6 +9,7 @@ pub mod parser;
 pub mod pipeline;
 
 pub use abi::*;
+pub use audio::*;
 pub use cache::TextureCache;
 pub use encoder::HardwareEncoder;
 pub use evaluator::TimelineEvaluator;

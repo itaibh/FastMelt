@@ -263,3 +263,39 @@ fn test_nested_mlt_producer_parsing() {
     let sub_file = proj.get_subtitle_file();
     assert_eq!(sub_file.unwrap().to_str().unwrap(), "/path/to/subs.ass");
 }
+
+#[test]
+fn test_audio_xml_generation() {
+    let xml = r#"
+    <mlt>
+      <profile width="1080" height="1920" frame_rate_num="25" frame_rate_den="1" />
+      <playlist id="playlist_audio">
+        <property name="kdenlive:audio_track">1</property>
+        <entry producer="audio1" in="0" out="100" />
+      </playlist>
+      <playlist id="playlist_video">
+        <entry producer="video1" in="0" out="100" />
+      </playlist>
+      <tractor id="root">
+        <track producer="playlist_audio" />
+        <track producer="playlist_video" />
+        <transition id="trans_vid">
+          <property name="mlt_service">qtblend</property>
+        </transition>
+        <filter id="f_vid">
+          <property name="mlt_service">qtblend</property>
+        </filter>
+      </tractor>
+    </mlt>
+    "#;
+
+    let proj = mlt_7::parser::MltProject::parse_xml(xml).expect("XML should parse cleanly");
+    assert!(mlt_7::audio::has_audio_content(&proj));
+
+    let audio_xml = mlt_7::audio::generate_audio_only_xml(xml).expect("Should generate audio XML");
+    assert!(audio_xml.contains("width=\"16\""));
+    assert!(audio_xml.contains("height=\"16\""));
+    assert!(audio_xml.contains("track producer=\"playlist_audio\""));
+    assert!(!audio_xml.contains("track producer=\"playlist_video\""));
+    assert!(!audio_xml.contains("qtblend"));
+}
