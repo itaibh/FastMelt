@@ -55,11 +55,17 @@ impl<'a> TimelineEvaluator<'a> {
                 }
             }
 
-            let active_transition = tractor.transitions.iter().find(|tr| {
-                tr.b_track == track_idx && frame >= tr.in_frame && (tr.out_frame == 0 || frame <= tr.out_frame)
+            // Only intercept track rendering if an actual transition (like a luma wipe) is active.
+            // Internal mixing transitions (always_active=1 without luma/keyframes) are blended directly.
+            let active_wipe = tractor.transitions.iter().find(|tr| {
+                (tr.luma.is_some() || tr.kdenlive_id == "wipe")
+                    && tr.b_track == track_idx
+                    && tr.out_frame > tr.in_frame
+                    && frame >= tr.in_frame
+                    && frame <= tr.out_frame
             });
 
-            if let Some(tr) = active_transition {
+            if let Some(tr) = active_wipe {
                 let mut track_fb = FrameBuffer::new(fb.width, fb.height);
                 self.render_track_content(&track.producer_id, frame, &mut track_fb, depth);
 

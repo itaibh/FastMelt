@@ -274,42 +274,63 @@ impl FrameBuffer {
                     let idx01 = y1 * src_stride + x0 * 4;
                     let idx11 = y1 * src_stride + x1 * 4;
 
-                    let sa = (src_data[idx00 + 3] as u32 * w00
-                        + src_data[idx10 + 3] as u32 * w10
-                        + src_data[idx01 + 3] as u32 * w01
-                        + src_data[idx11 + 3] as u32 * w11) >> 8;
+                    let a00 = src_data[idx00 + 3] as u32;
+                    let a10 = src_data[idx10 + 3] as u32;
+                    let a01 = src_data[idx01 + 3] as u32;
+                    let a11 = src_data[idx11 + 3] as u32;
+
+                    let wa00 = w00 * a00;
+                    let wa10 = w10 * a10;
+                    let wa01 = w01 * a01;
+                    let wa11 = w11 * a11;
+
+                    let sum_wa = wa00 + wa10 + wa01 + wa11;
+                    let sa = sum_wa >> 8;
 
                     let eff_a = (sa * opacity_u32 + 128) >> 8;
                     if eff_a <= 1 {
                         continue;
                     }
 
-                    let sr = (src_data[idx00] as u32 * w00
-                        + src_data[idx10] as u32 * w10
-                        + src_data[idx01] as u32 * w01
-                        + src_data[idx11] as u32 * w11) >> 8;
-                    let sg = (src_data[idx00 + 1] as u32 * w00
-                        + src_data[idx10 + 1] as u32 * w10
-                        + src_data[idx01 + 1] as u32 * w01
-                        + src_data[idx11 + 1] as u32 * w11) >> 8;
-                    let sb = (src_data[idx00 + 2] as u32 * w00
-                        + src_data[idx10 + 2] as u32 * w10
-                        + src_data[idx01 + 2] as u32 * w01
-                        + src_data[idx11 + 2] as u32 * w11) >> 8;
+                    // Weight RGB by alpha to prevent transparent pixel color bleeding / dark halos
+                    let (sr, sg, sb) = if sum_wa > 0 {
+                        (
+                            ((src_data[idx00] as u32 * wa00
+                                + src_data[idx10] as u32 * wa10
+                                + src_data[idx01] as u32 * wa01
+                                + src_data[idx11] as u32 * wa11)
+                                / sum_wa)
+                                .min(255),
+                            ((src_data[idx00 + 1] as u32 * wa00
+                                + src_data[idx10 + 1] as u32 * wa10
+                                + src_data[idx01 + 1] as u32 * wa01
+                                + src_data[idx11 + 1] as u32 * wa11)
+                                / sum_wa)
+                                .min(255),
+                            ((src_data[idx00 + 2] as u32 * wa00
+                                + src_data[idx10 + 2] as u32 * wa10
+                                + src_data[idx01 + 2] as u32 * wa01
+                                + src_data[idx11 + 2] as u32 * wa11)
+                                / sum_wa)
+                                .min(255),
+                        )
+                    } else {
+                        (0, 0, 0)
+                    };
 
                     let d_idx = x * 4;
-                    if eff_a >= 254 {
+                    let dr = row[d_idx] as u32;
+                    let dg = row[d_idx + 1] as u32;
+                    let db = row[d_idx + 2] as u32;
+                    let da = row[d_idx + 3] as u32;
+
+                    if eff_a >= 254 && da >= 254 {
                         row[d_idx] = sr as u8;
                         row[d_idx + 1] = sg as u8;
                         row[d_idx + 2] = sb as u8;
                         row[d_idx + 3] = 255;
                     } else {
                         let inv_a = 255 - eff_a;
-                        let dr = row[d_idx] as u32;
-                        let dg = row[d_idx + 1] as u32;
-                        let db = row[d_idx + 2] as u32;
-                        let da = row[d_idx + 3] as u32;
-
                         row[d_idx] = ((sr * eff_a + dr * inv_a + 128) / 255) as u8;
                         row[d_idx + 1] = ((sg * eff_a + dg * inv_a + 128) / 255) as u8;
                         row[d_idx + 2] = ((sb * eff_a + db * inv_a + 128) / 255) as u8;
@@ -508,33 +529,41 @@ impl FrameBuffer {
                 }
             });
 
-        // Pass 2: Vertical Blur (parallel across rows reading from scratch)
+        // Pass 2: Vertical Blur (cache-tiled parallel rows reading from scratch)
         let scratch_ref = &scratch[..stride * h];
         data[..stride * h]
             .par_chunks_exact_mut(stride)
             .enumerate()
             .for_each(|(y, out_row)| {
-                for x in 0..w {
-                    let mut r = 0.0f32;
-                    let mut g = 0.0f32;
-                    let mut b = 0.0f32;
-                    let mut a = 0.0f32;
+                for x_chunk in (0..w).step_by(64) {
+                    let x_end = (x_chunk + 64).min(w);
+                    let len = x_end - x_chunk;
+                    let mut acc_r = [0.0f32; 64];
+                    let mut acc_g = [0.0f32; 64];
+                    let mut acc_b = [0.0f32; 64];
+                    let mut acc_a = [0.0f32; 64];
 
                     for (ki, &weight) in k_ref.iter().enumerate() {
                         let offset = ki as i32 - radius_int;
                         let sample_y = (y as i32 + offset).clamp(0, h as i32 - 1) as usize;
-                        let s_idx = sample_y * stride + x * 4;
-                        r += scratch_ref[s_idx] as f32 * weight;
-                        g += scratch_ref[s_idx + 1] as f32 * weight;
-                        b += scratch_ref[s_idx + 2] as f32 * weight;
-                        a += scratch_ref[s_idx + 3] as f32 * weight;
+                        let sample_slice = &scratch_ref[sample_y * stride + x_chunk * 4..sample_y * stride + x_end * 4];
+
+                        for i in 0..len {
+                            let s = i * 4;
+                            acc_r[i] += sample_slice[s] as f32 * weight;
+                            acc_g[i] += sample_slice[s + 1] as f32 * weight;
+                            acc_b[i] += sample_slice[s + 2] as f32 * weight;
+                            acc_a[i] += sample_slice[s + 3] as f32 * weight;
+                        }
                     }
 
-                    let d_idx = x * 4;
-                    out_row[d_idx] = r.round().clamp(0.0, 255.0) as u8;
-                    out_row[d_idx + 1] = g.round().clamp(0.0, 255.0) as u8;
-                    out_row[d_idx + 2] = b.round().clamp(0.0, 255.0) as u8;
-                    out_row[d_idx + 3] = a.round().clamp(0.0, 255.0) as u8;
+                    for i in 0..len {
+                        let d = (x_chunk + i) * 4;
+                        out_row[d] = acc_r[i].round().clamp(0.0, 255.0) as u8;
+                        out_row[d + 1] = acc_g[i].round().clamp(0.0, 255.0) as u8;
+                        out_row[d + 2] = acc_b[i].round().clamp(0.0, 255.0) as u8;
+                        out_row[d + 3] = acc_a[i].round().clamp(0.0, 255.0) as u8;
+                    }
                 }
             });
     }
