@@ -185,6 +185,8 @@ pub struct Consumer {
     pub target: String,
     pub vcodec: String,
     pub acodec: String,
+    pub in_frame: Option<u64>,
+    pub out_frame: Option<u64>,
     pub extra_args: HashMap<String, String>,
 }
 
@@ -443,6 +445,10 @@ impl MltProject {
                 }
                 "consumer" => {
                     let mut target = node.attribute("target").unwrap_or("").to_string();
+                    let mut in_frame = node.attribute("in")
+                        .map(|s| Self::parse_time_str(s, project.profile.frame_rate_num, project.profile.frame_rate_den));
+                    let mut out_frame = node.attribute("out")
+                        .map(|s| Self::parse_time_str(s, project.profile.frame_rate_num, project.profile.frame_rate_den));
                     let mut vcodec = String::new();
                     let mut acodec = String::new();
                     let mut extra_args = HashMap::new();
@@ -454,6 +460,12 @@ impl MltProject {
                                 "target" if target.is_empty() => target = val,
                                 "vcodec" => vcodec = val,
                                 "acodec" => acodec = val,
+                                "in" if in_frame.is_none() => {
+                                    in_frame = Some(Self::parse_time_str(&val, project.profile.frame_rate_num, project.profile.frame_rate_den));
+                                }
+                                "out" if out_frame.is_none() => {
+                                    out_frame = Some(Self::parse_time_str(&val, project.profile.frame_rate_num, project.profile.frame_rate_den));
+                                }
                                 _ => {
                                     extra_args.insert(name.to_string(), val);
                                 }
@@ -465,6 +477,8 @@ impl MltProject {
                         target,
                         vcodec,
                         acodec,
+                        in_frame,
+                        out_frame,
                         extra_args,
                     });
                 }
@@ -522,6 +536,21 @@ impl MltProject {
             .map(|t| if t.out_frame > t.in_frame { t.out_frame - t.in_frame + 1 } else { 0 })
             .max()
             .unwrap_or(100)
+    }
+
+    /// Resolves start and end frames for rendering based on CLI args, consumer in/out, and root tractor
+    pub fn get_render_bounds(&self, cli_in: Option<u64>, cli_out: Option<u64>) -> (u64, u64) {
+        let start = cli_in
+            .or_else(|| self.consumer.as_ref().and_then(|c| c.in_frame))
+            .or_else(|| self.root_tractor_id.as_ref().and_then(|id| self.tractors.get(id)).map(|t| t.in_frame))
+            .unwrap_or(0);
+
+        let end = cli_out
+            .or_else(|| self.consumer.as_ref().and_then(|c| c.out_frame))
+            .or_else(|| self.root_tractor_id.as_ref().and_then(|id| self.tractors.get(id)).and_then(|t| if t.out_frame > t.in_frame { Some(t.out_frame) } else { None }))
+            .unwrap_or_else(|| start + self.get_total_frames().saturating_sub(1));
+
+        (start, end)
     }
 
     pub fn get_consumer_target(&self) -> Option<String> {

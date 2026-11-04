@@ -139,12 +139,10 @@ impl FrameBuffer {
             });
     }
 
-    /// Full 2D Affine Transformation Blitter (supports rotation, scaling, aspect ratio preservation)
-    pub fn blend_affine(
-        &mut self,
-        src_data: &[u8],
-        src_w: u32,
-        src_h: u32,
+    /// Build 2D Affine Matrix for qtblend geometry
+    pub fn build_affine_matrix(
+        src_w: f32,
+        src_h: f32,
         rect_x: f32,
         rect_y: f32,
         rect_w: f32,
@@ -152,45 +150,7 @@ impl FrameBuffer {
         rotation_deg: f32,
         rotate_center: bool,
         distort: bool,
-        opacity: f32,
-    ) {
-        if opacity <= 0.001 || rect_w <= 0.0 || rect_h <= 0.0 || src_w == 0 || src_h == 0 {
-            return;
-        }
-
-        // Fast path: axis-aligned (rotation == 0)
-        if rotation_deg.abs() <= 0.001 {
-            let (final_x, final_y, final_w, final_h) = if distort {
-                (rect_x, rect_y, rect_w, rect_h)
-            } else {
-                let src_aspect = src_w as f32 / src_h as f32;
-                let target_aspect = rect_w / rect_h;
-                let scale = if src_aspect >= target_aspect {
-                    rect_w / src_w as f32
-                } else {
-                    rect_h / src_h as f32
-                };
-                let draw_w = src_w as f32 * scale;
-                let draw_h = src_h as f32 * scale;
-                let fx = rect_x + (rect_w - draw_w) / 2.0;
-                let fy = rect_y + (rect_h - draw_h) / 2.0;
-                (fx, fy, draw_w, draw_h)
-            };
-
-            self.blend_raw(
-                src_data,
-                src_w,
-                src_h,
-                final_x.round() as i32,
-                final_y.round() as i32,
-                final_w.round().max(1.0) as u32,
-                final_h.round().max(1.0) as u32,
-                opacity,
-            );
-            return;
-        }
-
-        // General path: affine transform with rotation
+    ) -> Affine2 {
         let mut m = Affine2::from_translation(vec2(rect_x, rect_y));
         let rad = rotation_deg.to_radians();
         if rotate_center {
@@ -202,19 +162,34 @@ impl FrameBuffer {
         }
 
         if distort {
-            m = m * Affine2::from_scale(vec2(rect_w / src_w as f32, rect_h / src_h as f32));
+            m = m * Affine2::from_scale(vec2(rect_w / src_w, rect_h / src_h));
         } else {
-            let src_aspect = src_w as f32 / src_h as f32;
+            let src_aspect = src_w / src_h;
             let target_aspect = rect_w / rect_h;
             let scale = if src_aspect >= target_aspect {
-                rect_w / src_w as f32
+                rect_w / src_w
             } else {
-                rect_h / src_h as f32
+                rect_h / src_h
             };
-            let draw_w = src_w as f32 * scale;
-            let draw_h = src_h as f32 * scale;
+            let draw_w = src_w * scale;
+            let draw_h = src_h * scale;
             m = m * Affine2::from_translation(vec2((rect_w - draw_w) / 2.0, (rect_h - draw_h) / 2.0));
             m = m * Affine2::from_scale(vec2(scale, scale));
+        }
+        m
+    }
+
+    /// Full 2D Affine Transformation Blitter using precomputed Affine2 matrix
+    pub fn blend_affine_matrix(
+        &mut self,
+        src_data: &[u8],
+        src_w: u32,
+        src_h: u32,
+        m: Affine2,
+        opacity: f32,
+    ) {
+        if opacity <= 0.001 || src_w == 0 || src_h == 0 {
+            return;
         }
 
         let p0 = m.transform_point2(vec2(0.0, 0.0));
@@ -314,6 +289,71 @@ impl FrameBuffer {
                     }
                 }
             });
+    }
+
+    /// Full 2D Affine Transformation Blitter (supports rotation, scaling, aspect ratio preservation)
+    pub fn blend_affine(
+        &mut self,
+        src_data: &[u8],
+        src_w: u32,
+        src_h: u32,
+        rect_x: f32,
+        rect_y: f32,
+        rect_w: f32,
+        rect_h: f32,
+        rotation_deg: f32,
+        rotate_center: bool,
+        distort: bool,
+        opacity: f32,
+    ) {
+        if opacity <= 0.001 || rect_w <= 0.0 || rect_h <= 0.0 || src_w == 0 || src_h == 0 {
+            return;
+        }
+
+        // Fast path: axis-aligned (rotation == 0)
+        if rotation_deg.abs() <= 0.001 {
+            let (final_x, final_y, final_w, final_h) = if distort {
+                (rect_x, rect_y, rect_w, rect_h)
+            } else {
+                let src_aspect = src_w as f32 / src_h as f32;
+                let target_aspect = rect_w / rect_h;
+                let scale = if src_aspect >= target_aspect {
+                    rect_w / src_w as f32
+                } else {
+                    rect_h / src_h as f32
+                };
+                let draw_w = src_w as f32 * scale;
+                let draw_h = src_h as f32 * scale;
+                let fx = rect_x + (rect_w - draw_w) / 2.0;
+                let fy = rect_y + (rect_h - draw_h) / 2.0;
+                (fx, fy, draw_w, draw_h)
+            };
+
+            self.blend_raw(
+                src_data,
+                src_w,
+                src_h,
+                final_x.round() as i32,
+                final_y.round() as i32,
+                final_w.round().max(1.0) as u32,
+                final_h.round().max(1.0) as u32,
+                opacity,
+            );
+            return;
+        }
+
+        let m = Self::build_affine_matrix(
+            src_w as f32,
+            src_h as f32,
+            rect_x,
+            rect_y,
+            rect_w,
+            rect_h,
+            rotation_deg,
+            rotate_center,
+            distort,
+        );
+        self.blend_affine_matrix(src_data, src_w, src_h, m, opacity);
     }
 
     /// Fill a rectangle with solid or transparent color

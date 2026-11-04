@@ -187,3 +187,47 @@ fn test_blend_affine_aspect_preservation_and_rotation() {
     let top_idx = (55 * 200 + 100) * 4;
     assert_eq!(raw[top_idx], 0, "Aspect preservation should center image vertically leaving top empty");
 }
+
+#[test]
+fn test_render_bounds_resolution() {
+    let mut proj = mlt_7::parser::MltProject::default();
+    proj.consumer = Some(mlt_7::parser::Consumer {
+        target: "test.mp4".to_string(),
+        vcodec: "".to_string(),
+        acodec: "".to_string(),
+        in_frame: Some(100),
+        out_frame: Some(250),
+        extra_args: std::collections::HashMap::new(),
+    });
+
+    // 1. Without CLI overrides, should use consumer in/out
+    let (s, e) = proj.get_render_bounds(None, None);
+    assert_eq!((s, e), (100, 250));
+
+    // 2. CLI in override
+    let (s, e) = proj.get_render_bounds(Some(120), None);
+    assert_eq!((s, e), (120, 250));
+
+    // 3. CLI both overrides
+    let (s, e) = proj.get_render_bounds(Some(50), Some(300));
+    assert_eq!((s, e), (50, 300));
+}
+
+#[test]
+fn test_affine_matrix_composition() {
+    // Producer matrix M1: raw 100x100 -> placed at (10, 10) with size (50, 50)
+    let m1 = FrameBuffer::build_affine_matrix(100.0, 100.0, 10.0, 10.0, 50.0, 50.0, 0.0, false, true);
+
+    // Entry matrix M2: canvas 200x200 -> shifted by (20, 30)
+    let m2 = FrameBuffer::build_affine_matrix(200.0, 200.0, 20.0, 30.0, 200.0, 200.0, 0.0, false, true);
+
+    // Composite M = M2 * M1
+    let m = m2 * m1;
+
+    // Point (0, 0) in src:
+    // Through M1: (10, 10)
+    // Through M2: (20 + 10, 30 + 10) = (30, 40)
+    let p0 = m.transform_point2(glam::vec2(0.0, 0.0));
+    assert!((p0.x - 30.0).abs() < 0.01);
+    assert!((p0.y - 40.0).abs() < 0.01);
+}

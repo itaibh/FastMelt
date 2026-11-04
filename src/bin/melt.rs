@@ -199,15 +199,12 @@ fn main() {
             let fps_num = proj.profile.frame_rate_num;
             let fps_den = proj.profile.frame_rate_den;
 
-            let total_frames = if let (Some(start), Some(end)) = (cli_in, cli_out) {
-                if end >= start { end - start + 1 } else { 1 }
-            } else {
-                proj.get_total_frames()
-            };
+            let (start_frame, end_frame) = proj.get_render_bounds(cli_in, cli_out);
+            let total_frames = if end_frame >= start_frame { end_frame - start_frame + 1 } else { 1 };
 
             log_msg("MELT", &format!(
-                "Starting hardware render pipeline: {}x{} @ {}/{} fps, {} total frames -> {}",
-                width, height, fps_num, fps_den, total_frames, target
+                "Starting hardware render pipeline: {}x{} @ {}/{} fps, frames {}..={} ({} total frames) -> {}",
+                width, height, fps_num, fps_den, start_frame, end_frame, total_frames, target
             ));
 
             match HardwareEncoder::new(width, height, fps_num, fps_den, target) {
@@ -217,10 +214,9 @@ fn main() {
                     let mut fb = FrameBuffer::new(width, height);
 
                     let mut render_success = true;
-                    let start_offset = cli_in.unwrap_or(0);
 
                     for frame in 1..=total_frames {
-                        let timeline_frame = start_offset + frame - 1;
+                        let timeline_frame = start_frame + frame - 1;
                         evaluator.evaluate_frame(timeline_frame, &mut fb);
 
                         if let Err(e) = encoder.write_frame(fb.raw_bytes()) {

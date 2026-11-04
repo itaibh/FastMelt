@@ -135,73 +135,163 @@ impl<'a> TimelineEvaluator<'a> {
         fb: &mut FrameBuffer,
         depth: u32,
     ) {
-        let (qtblend, drop_shadow, gaussian_blur, tint, hflip) = self.collect_filters(producer, extra_filters);
-
-        let (rx, ry, rw, rh, opacity, rotation, rotate_center, distort) = if let Some((rect_kfs, rot_kfs, rc, dist)) = qtblend {
-            let (x, y, w, h, op) = KeyframeRect::interpolate(rect_kfs, clip_frame);
-            let rot = MltProject::interpolate_float(rot_kfs, clip_frame);
-            (x, y, w, h, op, rot, rc, dist)
-        } else {
-            (0.0, 0.0, fb.width as f32, fb.height as f32, 1.0, 0.0, false, false)
-        };
-
         match &producer.source {
             ProducerSource::Image(rel_or_abs_path) => {
                 let resolved_path = self.resolve_path(rel_or_abs_path);
+
+                // Collect effect filters
+                let all_filters: Vec<_> = extra_filters
+                    .into_iter()
+                    .flatten()
+                    .chain(producer.filters.iter())
+                    .collect();
+
+                let mut drop_shadow = None;
+                let mut gaussian_blur = None;
+                let mut tint = None;
+                let mut hflip = false;
+
+                for f in &all_filters {
+                    match &f.filter_type {
+                        FilterType::DropShadow { radius, x_offset, y_offset, color } => {
+                            if drop_shadow.is_none() {
+                                drop_shadow = Some((*radius, *x_offset, *y_offset, *color));
+                            }
+                        }
+                        FilterType::GaussianBlur { sigma } => {
+                            if gaussian_blur.is_none() {
+                                gaussian_blur = Some(*sigma);
+                            }
+                        }
+                        FilterType::Tint { color, amount } => {
+                            if tint.is_none() {
+                                tint = Some((*color, *amount));
+                            }
+                        }
+                        FilterType::HorizontalFlip => {
+                            hflip = true;
+                        }
+                        _ => {}
+                    }
+                }
+
                 let tint_opt = tint.map(|(c, _)| c);
                 let sigma_val = gaussian_blur.unwrap_or(0.0);
 
                 if let Some(img) = self.cache.get_or_load_processed(&resolved_path, tint_opt, sigma_val, hflip).cloned() {
                     let src_w = img.width();
                     let src_h = img.height();
+                    let canvas_w = fb.width as f32;
+                    let canvas_h = fb.height as f32;
 
-                    // Calculate actual drawn geometry (accounting for distort = false aspect ratio preservation)
-                    let (draw_x, draw_y, draw_w, draw_h) = if distort {
-                        (rx, ry, rw, rh)
-                    } else if rw > 0.0 && rh > 0.0 && src_w > 0 && src_h > 0 {
-                        let src_aspect = src_w as f32 / src_h as f32;
-                        let target_aspect = rw / rh;
-                        let scale = if src_aspect >= target_aspect {
-                            rw / src_w as f32
-                        } else {
-                            rh / src_h as f32
-                        };
-                        let dw = src_w as f32 * scale;
-                        let dh = src_h as f32 * scale;
-                        let fx = rx + (rw - dw) / 2.0;
-                        let fy = ry + (rh - dh) / 2.0;
-                        (fx, fy, dw, dh)
-                    } else {
-                        (rx, ry, rw, rh)
+                    // 1. Resolve Producer-level transform
+                    let mut prod_matrix = None;
+                    let mut prod_opacity = 1.0f32;
+
+                    for f in &producer.filters {
+                        if let FilterType::QtBlend { rect_keyframes, rotation_keyframes, rotate_center, distort } = &f.filter_type {
+                            let (rx, ry, rw, rh, op) = KeyframeRect::interpolate(rect_keyframes, clip_frame);
+                            let rot = MltProject::interpolate_float(rotation_keyframes, clip_frame);
+                            prod_opacity = op;
+
+                            let is_ident = rot.abs() <= 0.001
+                                && rx.abs() <= 0.001
+                                && ry.abs() <= 0.001
+                                && (rw - src_w as f32).abs() <= 1.0
+                                && (rh - src_h as f32).abs() <= 1.0;
+
+                            if !is_ident {
+                                prod_matrix = Some(FrameBuffer::build_affine_matrix(
+                                    src_w as f32,
+                                    src_h as f32,
+                                    rx,
+                                    ry,
+                                    rw,
+                                    rh,
+                                    rot,
+                                    *rotate_center,
+                                    *distort,
+                                ));
+                                break;
+                            }
+                        }
+                    }
+
+                    // 2. Resolve Playlist entry-level transform
+                    let mut entry_matrix = None;
+                    let mut entry_opacity = 1.0f32;
+
+                    if let Some(extras) = extra_filters {
+                        // Find active non-identity qtblend (prioritize specific transforms over 0 0 1080 1920)
+                        let mut candidates = Vec::new();
+                        for f in extras {
+                            if let FilterType::QtBlend { rect_keyframes, rotation_keyframes, rotate_center, distort } = &f.filter_type {
+                                let (rx, ry, rw, rh, op) = KeyframeRect::interpolate(rect_keyframes, clip_frame);
+                                let rot = MltProject::interpolate_float(rotation_keyframes, clip_frame);
+                                let is_ident = rot.abs() <= 0.001
+                                    && rx.abs() <= 0.001
+                                    && ry.abs() <= 0.001
+                                    && (rw - canvas_w).abs() <= 1.0
+                                    && (rh - canvas_h).abs() <= 1.0;
+                                candidates.push((rx, ry, rw, rh, op, rot, *rotate_center, *distort, is_ident));
+                            }
+                        }
+
+                        // Pick the first non-identity transform, or fallback to the last transform
+                        if let Some(&(rx, ry, rw, rh, op, rot, rc, dist, is_ident)) = candidates.iter().find(|c| !c.8).or_else(|| candidates.last()) {
+                            entry_opacity = op;
+                            if !is_ident {
+                                entry_matrix = Some((rx, ry, rw, rh, rot, rc, dist));
+                            }
+                        }
+                    }
+
+                    // 3. Compose final affine matrix
+                    let (composite_matrix, total_opacity) = match (prod_matrix, entry_matrix) {
+                        (Some(m1), Some((rx2, ry2, rw2, rh2, rot2, rc2, dist2))) => {
+                            let m2 = FrameBuffer::build_affine_matrix(canvas_w, canvas_h, rx2, ry2, rw2, rh2, rot2, rc2, dist2);
+                            (m2 * m1, prod_opacity * entry_opacity)
+                        }
+                        (Some(m1), None) => (m1, prod_opacity * entry_opacity),
+                        (None, Some((rx2, ry2, rw2, rh2, rot2, rc2, dist2))) => {
+                            let m2 = FrameBuffer::build_affine_matrix(src_w as f32, src_h as f32, rx2, ry2, rw2, rh2, rot2, rc2, dist2);
+                            (m2, entry_opacity)
+                        }
+                        (None, None) => {
+                            let m = FrameBuffer::build_affine_matrix(src_w as f32, src_h as f32, 0.0, 0.0, canvas_w, canvas_h, 0.0, false, false);
+                            (m, 1.0)
+                        }
                     };
 
-                    // 1. Drop shadow is rendered behind the image at (draw_x + x_off, draw_y + y_off)
+                    // 4. Render drop shadow if present
                     if let Some((radius, x_off, y_off, color)) = drop_shadow {
+                        // Drop shadow geometry using affine bounds
+                        let p0 = composite_matrix.transform_point2(glam::vec2(0.0, 0.0));
+                        let p2 = composite_matrix.transform_point2(glam::vec2(src_w as f32, src_h as f32));
+                        let shadow_x = (p0.x.min(p2.x) + x_off) as i32;
+                        let shadow_y = (p0.y.min(p2.y) + y_off) as i32;
+                        let shadow_w = (p2.x - p0.x).abs().round().max(1.0) as u32;
+                        let shadow_h = (p2.y - p0.y).abs().round().max(1.0) as u32;
+
                         fb.render_drop_shadow(
                             &img,
-                            (draw_x + x_off) as i32,
-                            (draw_y + y_off) as i32,
-                            draw_w.round().max(1.0) as u32,
-                            draw_h.round().max(1.0) as u32,
+                            shadow_x,
+                            shadow_y,
+                            shadow_w,
+                            shadow_h,
                             radius,
                             color,
-                            opacity * 0.8,
+                            total_opacity * 0.8,
                         );
                     }
 
-                    // 2. Blend processed image with full 2D affine transform (rotation + aspect scaling)
-                    fb.blend_affine(
+                    // 5. Blend processed image with composite matrix
+                    fb.blend_affine_matrix(
                         img.as_raw(),
                         src_w,
                         src_h,
-                        rx,
-                        ry,
-                        rw,
-                        rh,
-                        rotation,
-                        rotate_center,
-                        distort,
-                        opacity,
+                        composite_matrix,
+                        total_opacity,
                     );
                 }
             }
@@ -210,13 +300,27 @@ impl<'a> TimelineEvaluator<'a> {
                     // Completely transparent base track - do not clear or paint!
                     return;
                 }
+                let mut opacity = 1.0f32;
+                let mut rect = (0.0f32, 0.0f32, fb.width as f32, fb.height as f32);
+
+                if let Some(extras) = extra_filters {
+                    for f in extras {
+                        if let FilterType::QtBlend { rect_keyframes, .. } = &f.filter_type {
+                            let (x, y, w, h, op) = KeyframeRect::interpolate(rect_keyframes, clip_frame);
+                            rect = (x, y, w, h);
+                            opacity = op;
+                            break;
+                        }
+                    }
+                }
+
                 let a = (((color[3] as f32 / 255.0) * opacity * 255.0)).round().clamp(0.0, 255.0) as u8;
                 let c = [color[0], color[1], color[2], a];
 
-                if opacity >= 0.99 && a == 255 && rx <= 0.0 && ry <= 0.0 && rw >= fb.width as f32 && rh >= fb.height as f32 {
+                if opacity >= 0.99 && a == 255 && rect.0 <= 0.0 && rect.1 <= 0.0 && rect.2 >= fb.width as f32 && rect.3 >= fb.height as f32 {
                     fb.clear(c);
                 } else {
-                    fb.fill_rect(rx as i32, ry as i32, rw as u32, rh as u32, c);
+                    fb.fill_rect(rect.0 as i32, rect.1 as i32, rect.2 as u32, rect.3 as u32, c);
                 }
             }
             ProducerSource::NestedTractor(tid) => {
@@ -226,57 +330,6 @@ impl<'a> TimelineEvaluator<'a> {
                 // Video decoder pass if present
             }
         }
-    }
-
-    fn collect_filters<'b>(
-        &self,
-        producer: &'b crate::parser::Producer,
-        extra_filters: Option<&'b [crate::parser::Filter]>,
-    ) -> (
-        Option<(&'b Vec<KeyframeRect>, &'b Vec<(u64, f32)>, bool, bool)>, // (rect_kfs, rot_kfs, rotate_center, distort)
-        Option<(f32, f32, f32, u32)>,                                     // drop shadow: (radius, x_off, y_off, color)
-        Option<f32>,                                                      // blur: sigma
-        Option<([u8; 4], f32)>,                                          // tint: (color, amount)
-        bool,                                                             // hflip
-    ) {
-        let mut qtblend = None;
-        let mut shadow = None;
-        let mut blur = None;
-        let mut tint = None;
-        let mut hflip = false;
-
-        let all_filters = extra_filters.into_iter().flatten().chain(producer.filters.iter());
-
-        for f in all_filters {
-            match &f.filter_type {
-                FilterType::QtBlend { rect_keyframes, rotation_keyframes, rotate_center, distort } => {
-                    if qtblend.is_none() {
-                        qtblend = Some((rect_keyframes, rotation_keyframes, *rotate_center, *distort));
-                    }
-                }
-                FilterType::DropShadow { radius, x_offset, y_offset, color } => {
-                    if shadow.is_none() {
-                        shadow = Some((*radius, *x_offset, *y_offset, *color));
-                    }
-                }
-                FilterType::GaussianBlur { sigma } => {
-                    if blur.is_none() {
-                        blur = Some(*sigma);
-                    }
-                }
-                FilterType::Tint { color, amount } => {
-                    if tint.is_none() {
-                        tint = Some((*color, *amount));
-                    }
-                }
-                FilterType::HorizontalFlip => {
-                    hflip = true;
-                }
-                _ => {}
-            }
-        }
-
-        (qtblend, shadow, blur, tint, hflip)
     }
 
     fn resolve_path(&self, p: &std::path::Path) -> PathBuf {
