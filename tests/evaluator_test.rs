@@ -231,3 +231,35 @@ fn test_affine_matrix_composition() {
     assert!((p0.x - 30.0).abs() < 0.01);
     assert!((p0.y - 40.0).abs() < 0.01);
 }
+
+#[test]
+fn test_nested_mlt_producer_parsing() {
+    let xml = r#"
+    <mlt>
+      <profile width="1080" height="1920" frame_rate_num="25" frame_rate_den="1" />
+      <producer id="prod_title">
+        <property name="resource">/path/to/nested_title.mlt</property>
+        <property name="mlt_service">xml</property>
+      </producer>
+      <tractor id="root">
+        <filter id="sub1">
+          <property name="mlt_service">avfilter.subtitles</property>
+          <property name="av.filename">/path/to/subs.ass</property>
+        </filter>
+        <track producer="prod_title" />
+      </tractor>
+    </mlt>
+    "#;
+
+    let proj = mlt_7::parser::MltProject::parse_xml(xml).expect("XML should parse cleanly");
+    let prod = proj.producers.get("prod_title").expect("Producer should exist");
+    match &prod.source {
+        mlt_7::parser::ProducerSource::MltXml(path) => {
+            assert_eq!(path.to_str().unwrap(), "/path/to/nested_title.mlt");
+        }
+        _ => panic!("Expected ProducerSource::MltXml, got {:?}", prod.source),
+    }
+
+    let sub_file = proj.get_subtitle_file();
+    assert_eq!(sub_file.unwrap().to_str().unwrap(), "/path/to/subs.ass");
+}

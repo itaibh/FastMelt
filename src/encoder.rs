@@ -20,6 +20,7 @@ impl HardwareEncoder {
         fps_num: u32,
         fps_den: u32,
         target_path: &str,
+        subtitle_path: Option<&Path>,
     ) -> io::Result<Self> {
         let fps = (fps_num as f64) / (fps_den.max(1) as f64);
         let fps_str = format!("{}/{}", fps_num, fps_den.max(1));
@@ -50,25 +51,45 @@ impl HardwareEncoder {
             .arg("-r").arg(&fps_str)
             .arg("-i").arg("-");
 
+        let sub_filter = if let Some(sub) = subtitle_path {
+            if sub.exists() {
+                let escaped = sub.to_string_lossy().replace(':', "\\:").replace('\'', "\\'");
+                Some(format!("subtitles='{}'", escaped))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         if has_vaapi {
             log_msg(
                 "ENCODER",
                 &format!(
-                    "Spawning FFmpeg VA-API hardware encoder on {} ({} @ {} fps -> {})",
-                    vaapi_device, res_str, fps, target_path
+                    "Spawning FFmpeg VA-API hardware encoder on {} ({} @ {} fps -> {}){}",
+                    vaapi_device, res_str, fps, target_path,
+                    if sub_filter.is_some() { " with burned subtitles" } else { "" }
                 ),
             );
-            cmd.arg("-vaapi_device").arg(vaapi_device)
-                .arg("-vf").arg("format=nv12,hwupload")
-                .arg("-c:v").arg("h264_vaapi");
+            cmd.arg("-vaapi_device").arg(vaapi_device);
+            if let Some(ref sf) = sub_filter {
+                cmd.arg("-vf").arg(format!("{},format=nv12,hwupload", sf));
+            } else {
+                cmd.arg("-vf").arg("format=nv12,hwupload");
+            }
+            cmd.arg("-c:v").arg("h264_vaapi");
         } else {
             log_msg(
                 "ENCODER",
                 &format!(
-                    "VA-API device not found; using fallback x264 encoder ({} @ {} fps -> {})",
-                    res_str, fps, target_path
+                    "VA-API device not found; using fallback x264 encoder ({} @ {} fps -> {}){}",
+                    res_str, fps, target_path,
+                    if sub_filter.is_some() { " with burned subtitles" } else { "" }
                 ),
             );
+            if let Some(ref sf) = sub_filter {
+                cmd.arg("-vf").arg(sf);
+            }
             cmd.arg("-c:v").arg("libx264")
                 .arg("-preset").arg("ultrafast")
                 .arg("-pix_fmt").arg("yuv420p");

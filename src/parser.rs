@@ -87,6 +87,7 @@ pub enum FilterType {
         color: [u8; 4],
         amount: f32,
     },
+    Subtitles(String),
     HorizontalFlip,
     Passthrough(String),
 }
@@ -102,6 +103,7 @@ pub enum ProducerSource {
     Image(PathBuf),
     Color([u8; 4]),
     Video(PathBuf),
+    MltXml(PathBuf),
     NestedTractor(String),
 }
 
@@ -336,10 +338,16 @@ impl MltProject {
                             || resource.ends_with(".jpg")
                             || resource.ends_with(".jpeg");
 
+                        let is_xml = service == "xml"
+                            || resource.ends_with(".mlt")
+                            || resource.ends_with(".kdenlive");
+
                         let source = if is_image {
                             ProducerSource::Image(PathBuf::from(resource))
                         } else if service == "color" {
                             ProducerSource::Color(Self::parse_color_str(&resource))
+                        } else if is_xml {
+                            ProducerSource::MltXml(PathBuf::from(resource))
                         } else {
                             ProducerSource::Video(PathBuf::from(resource))
                         };
@@ -553,6 +561,33 @@ impl MltProject {
         (start, end)
     }
 
+    /// Finds any active subtitle file attached to root or nested tractors
+    pub fn get_subtitle_file(&self) -> Option<PathBuf> {
+        // First check root tractor
+        if let Some(ref root_id) = self.root_tractor_id {
+            if let Some(root_t) = self.tractors.get(root_id) {
+                for f in &root_t.filters {
+                    if let FilterType::Subtitles(ref s) = f.filter_type {
+                        if !s.is_empty() {
+                            return Some(PathBuf::from(s));
+                        }
+                    }
+                }
+            }
+        }
+        // Check any tractor
+        for t in self.tractors.values() {
+            for f in &t.filters {
+                if let FilterType::Subtitles(ref s) = f.filter_type {
+                    if !s.is_empty() {
+                        return Some(PathBuf::from(s));
+                    }
+                }
+            }
+        }
+        None
+    }
+
     pub fn get_consumer_target(&self) -> Option<String> {
         self.consumer.as_ref().and_then(|c| {
             if !c.target.is_empty() && c.target != "null" {
@@ -577,6 +612,7 @@ impl MltProject {
             let mut color_str = String::new();
             let mut tint_color_str = String::new();
             let mut tint_amount_str = String::new();
+            let mut filename_str = String::new();
             let mut x_str = String::new();
             let mut y_str = String::new();
             let mut disabled = false;
@@ -596,6 +632,7 @@ impl MltProject {
                         "color" => color_str = val.to_string(),
                         "Map white to" | "Map black to" => tint_color_str = val.to_string(),
                         "Tint amount" => tint_amount_str = val.to_string(),
+                        "av.filename" | "filename" => filename_str = val.to_string(),
                         "x" => x_str = val.to_string(),
                         "y" => y_str = val.to_string(),
                         _ => {}
@@ -632,6 +669,8 @@ impl MltProject {
                     y_offset,
                     color,
                 }
+            } else if service == "avfilter.subtitles" || service == "subtitles" {
+                FilterType::Subtitles(filename_str)
             } else if service == "frei0r.tint0r" {
                 let raw_c = tint_color_str.split('=').last().unwrap_or("0x000000ff").trim();
                 let color = Self::parse_color_str(raw_c);

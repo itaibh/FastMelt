@@ -207,7 +207,9 @@ fn main() {
                 width, height, fps_num, fps_den, start_frame, end_frame, total_frames, target
             ));
 
-            match HardwareEncoder::new(width, height, fps_num, fps_den, target) {
+            let sub_file = proj.get_subtitle_file();
+
+            match HardwareEncoder::new(width, height, fps_num, fps_den, target, sub_file.as_deref()) {
                 Ok(mut encoder) => {
                     let mut cache = TextureCache::new();
                     let mut evaluator = TimelineEvaluator::new(proj, &mut cache);

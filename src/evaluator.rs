@@ -6,11 +6,16 @@ use crate::pipeline::FrameBuffer;
 pub struct TimelineEvaluator<'a> {
     project: &'a MltProject,
     cache: &'a mut TextureCache,
+    nested_projects: std::collections::HashMap<PathBuf, MltProject>,
 }
 
 impl<'a> TimelineEvaluator<'a> {
     pub fn new(project: &'a MltProject, cache: &'a mut TextureCache) -> Self {
-        Self { project, cache }
+        Self {
+            project,
+            cache,
+            nested_projects: std::collections::HashMap::new(),
+        }
     }
 
     pub fn evaluate_frame(&mut self, frame: u64, fb: &mut FrameBuffer) {
@@ -95,7 +100,7 @@ impl<'a> TimelineEvaluator<'a> {
                     }
                 });
 
-                if let Some((ref rect_kfs, ref rot_kfs, rc, dist)) = qtblend_opt {
+                if let Some((ref rect_kfs, ref rot_kfs, rc, _dist)) = qtblend_opt {
                     let (rx, ry, rw, rh, opacity) = KeyframeRect::interpolate(rect_kfs, clip_frame);
                     let rot = MltProject::interpolate_float(rot_kfs, clip_frame);
 
@@ -113,7 +118,7 @@ impl<'a> TimelineEvaluator<'a> {
                         rh,
                         rot,
                         rc,
-                        dist,
+                        true,
                         opacity,
                     );
                 } else {
@@ -248,8 +253,8 @@ impl<'a> TimelineEvaluator<'a> {
 
                     // 3. Compose final affine matrix
                     let (composite_matrix, total_opacity) = match (prod_matrix, entry_matrix) {
-                        (Some(m1), Some((rx2, ry2, rw2, rh2, rot2, rc2, dist2))) => {
-                            let m2 = FrameBuffer::build_affine_matrix(canvas_w, canvas_h, rx2, ry2, rw2, rh2, rot2, rc2, dist2);
+                        (Some(m1), Some((rx2, ry2, rw2, rh2, rot2, rc2, _dist2))) => {
+                            let m2 = FrameBuffer::build_affine_matrix(canvas_w, canvas_h, rx2, ry2, rw2, rh2, rot2, rc2, true);
                             (m2 * m1, prod_opacity * entry_opacity)
                         }
                         (Some(m1), None) => (m1, prod_opacity * entry_opacity),
@@ -326,6 +331,88 @@ impl<'a> TimelineEvaluator<'a> {
             ProducerSource::NestedTractor(tid) => {
                 self.render_tractor(tid, clip_frame, fb, depth + 1);
             }
+            ProducerSource::MltXml(rel_or_abs_path) => {
+                let resolved_path = self.resolve_path(rel_or_abs_path);
+                if !self.nested_projects.contains_key(&resolved_path) {
+                    if let Ok(mut sub_proj) = MltProject::from_file(&resolved_path) {
+                        if sub_proj.root_dir.is_none() {
+                            sub_proj.root_dir = resolved_path.parent().map(|p| p.to_path_buf());
+                        }
+                        self.nested_projects.insert(resolved_path.clone(), sub_proj);
+                    }
+                }
+
+                if let Some(sub_proj) = self.nested_projects.get(&resolved_path).cloned() {
+                    let sub_root_id = sub_proj.root_tractor_id.clone()
+                        .or_else(|| sub_proj.tractors.keys().next().cloned());
+
+                    if let Some(root_id) = sub_root_id {
+                        let mut sub_fb = FrameBuffer::new(fb.width, fb.height);
+                        sub_fb.clear([0, 0, 0, 0]);
+
+                        // Evaluate sub-tractor using our shared texture cache
+                        {
+                            let mut sub_evaluator = TimelineEvaluator {
+                                project: &sub_proj,
+                                cache: self.cache,
+                                nested_projects: std::collections::HashMap::new(),
+                            };
+                            sub_evaluator.render_tractor(&root_id, clip_frame, &mut sub_fb, depth + 1);
+                        }
+
+                        // Collect extra filters and producer filters
+                        let all_filters: Vec<_> = extra_filters
+                            .into_iter()
+                            .flatten()
+                            .chain(producer.filters.iter())
+                            .collect();
+
+                        let mut qtblend_filter = None;
+
+                        for f in &all_filters {
+                            if let FilterType::QtBlend { rect_keyframes, rotation_keyframes, rotate_center, distort } = &f.filter_type {
+                                if qtblend_filter.is_none() {
+                                    qtblend_filter = Some((rect_keyframes.clone(), rotation_keyframes.clone(), *rotate_center, *distort));
+                                }
+                            }
+                        }
+
+                        if let Some((ref rect_kfs, ref rot_kfs, rc, _dist)) = qtblend_filter {
+                            let (rx, ry, rw, rh, opacity) = KeyframeRect::interpolate(rect_kfs, clip_frame);
+                            let rot = MltProject::interpolate_float(rot_kfs, clip_frame);
+
+                            fb.blend_affine(
+                                sub_fb.raw_bytes(),
+                                sub_fb.width,
+                                sub_fb.height,
+                                rx,
+                                ry,
+                                rw,
+                                rh,
+                                rot,
+                                rc,
+                                true,
+                                opacity,
+                            );
+                        } else {
+                            // Direct alpha composite onto fb
+                            fb.blend_affine(
+                                sub_fb.raw_bytes(),
+                                sub_fb.width,
+                                sub_fb.height,
+                                0.0,
+                                0.0,
+                                fb.width as f32,
+                                fb.height as f32,
+                                0.0,
+                                false,
+                                true,
+                                1.0,
+                            );
+                        }
+                    }
+                }
+            }
             ProducerSource::Video(_) => {
                 // Video decoder pass if present
             }
@@ -333,12 +420,47 @@ impl<'a> TimelineEvaluator<'a> {
     }
 
     fn resolve_path(&self, p: &std::path::Path) -> PathBuf {
-        if p.is_absolute() {
-            p.to_path_buf()
-        } else if let Some(ref root) = self.project.root_dir {
-            root.join(p)
-        } else {
-            p.to_path_buf()
+        if p.is_absolute() && p.exists() {
+            return p.to_path_buf();
         }
+        if let Some(ref root) = self.project.root_dir {
+            let candidate = root.join(p);
+            if candidate.exists() {
+                return candidate;
+            }
+        }
+        if let Ok(home) = std::env::var("HOME") {
+            let candidate = std::path::Path::new(&home).join(p);
+            if candidate.exists() {
+                return candidate;
+            }
+        }
+        // Fallback: check if filename exists in root or library or common folders
+        if let Some(fname) = p.file_name() {
+            if let Some(ref root) = self.project.root_dir {
+                let candidate = root.join(fname);
+                if candidate.exists() {
+                    return candidate;
+                }
+                let graphics = root.join("graphics").join(fname);
+                if graphics.exists() {
+                    return graphics;
+                }
+            }
+            if let Ok(home) = std::env::var("HOME") {
+                let base = std::path::Path::new(&home).join("Videos/rogue unfiltered");
+                let c1 = base.join(fname);
+                if c1.exists() { return c1; }
+                let c2 = base.join("graphics").join(fname);
+                if c2.exists() { return c2; }
+                let c3 = base.join("library/graphics").join(fname);
+                if c3.exists() { return c3; }
+                let c4 = base.join("e01").join(fname);
+                if c4.exists() { return c4; }
+                let c5 = base.join("library").join(fname);
+                if c5.exists() { return c5; }
+            }
+        }
+        p.to_path_buf()
     }
 }
