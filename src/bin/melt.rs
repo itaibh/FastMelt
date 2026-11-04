@@ -27,7 +27,7 @@ fn main() {
         || args.contains(&"--version".to_string()) 
         || args.contains(&"-v".to_string()) 
     {
-        println!("melt 7.43.0 (OliveMltBridge v{})", VERSION);
+        println!("melt 7.43.0 (FastMelt v{})", VERSION);
         log_msg("MELT", &format!("Printed version string (v{}) and exited.", VERSION));
         return;
     }
@@ -35,7 +35,7 @@ fn main() {
     // Check if invoked with --help or no args
     if args.len() < 2 || args.contains(&"--help".to_string()) || args.contains(&"-h".to_string()) {
         log_msg("MELT", "Printed help message and exited.");
-        println!("OliveMltBridge melt v{} (GPU-Accelerated drop-in replacement for MLT melt)", VERSION);
+        println!("FastMelt melt v{} (GPU-Accelerated drop-in replacement for MLT melt)", VERSION);
         println!("Usage: melt [options] <project.mlt>");
         println!("Options:");
         println!("  -progress2 <file>   Render file and print progress on stdout");
@@ -158,8 +158,8 @@ fn main() {
     let start_time = Instant::now();
 
     // Check if user explicitly requested forced fallback to stock melt
-    if env::var("OLIVE_FORCE_FALLBACK").is_ok() {
-        log_msg("MELT", "OLIVE_FORCE_FALLBACK set: Delegating directly to stock melt...");
+    if env::var("FASTMELT_FORCE_FALLBACK").is_ok() || env::var("OLIVE_FORCE_FALLBACK").is_ok() {
+        log_msg("MELT", "Force fallback set: Delegating directly to stock melt...");
         let code = UpstreamMlt::delegate_to_stock_melt(&args[1..]).unwrap_or(1);
         log_msg("MELT", &format!("Upstream melt returned code: {}", code));
         log_msg("MELT", "=== INVOCATION END ===");
@@ -167,8 +167,8 @@ fn main() {
     }
 
     // Check if user explicitly requested isolated benchmark simulation mode
-    if env::var("OLIVE_BENCHMARK_SIMULATION").is_ok() {
-        log_msg("MELT", "OLIVE_BENCHMARK_SIMULATION set: Running in-memory framebuffer benchmark loop...");
+    if env::var("FASTMELT_BENCHMARK_SIMULATION").is_ok() || env::var("OLIVE_BENCHMARK_SIMULATION").is_ok() {
+        log_msg("MELT", "Benchmark simulation set: Running in-memory framebuffer benchmark loop...");
         let mut fb = FrameBuffer::new(1080, 1920);
         let total_frames = 100;
         for frame in 1..=total_frames {

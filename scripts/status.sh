@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# OliveMltBridge Flatpak Status Checker
+# FastMelt Flatpak Status Checker
 
 set -euo pipefail
 
@@ -16,7 +16,7 @@ echo "=========================================================="
 echo "Flatpak Path: $FLATPAK_DIR"
 echo "Project Path: $REPO_DIR"
 echo
-
+ 
 # Check Project Binaries
 echo "--- Project Binaries ---"
 if [ -f "$PROJECT_MELT" ]; then
@@ -39,7 +39,7 @@ MELT_LINK="$BIN_DIR/melt"
 if [ -L "$MELT_LINK" ]; then
     MELT_TARGET="$(readlink "$MELT_LINK")"
     if [[ "$MELT_TARGET" == *"$PROJECT_MELT"* || "$MELT_TARGET" == *"$REPO_DIR"* ]]; then
-        MELT_STATUS="[PROJECT] OliveMltBridge"
+        MELT_STATUS="[PROJECT] FastMelt"
     elif [[ "$MELT_TARGET" == "melt-7" || "$MELT_TARGET" == *"/melt-7"* ]]; then
         MELT_STATUS="[ORIGINAL] Stock MLT"
     else
@@ -56,7 +56,7 @@ LIBMLT_LINK="$LIB_DIR/libmlt.so"
 if [ -L "$LIBMLT_LINK" ]; then
     LIBMLT_TARGET="$(readlink "$LIBMLT_LINK")"
     if [[ "$LIBMLT_TARGET" == *"$PROJECT_LIBMLT"* || "$LIBMLT_TARGET" == *"$REPO_DIR"* ]]; then
-        LIBMLT_STATUS="[PROJECT] OliveMltBridge"
+        LIBMLT_STATUS="[PROJECT] FastMelt"
     else
         LIBMLT_STATUS="[OTHER] $LIBMLT_TARGET"
     fi
@@ -71,7 +71,7 @@ LIBMLT7_LINK="$LIB_DIR/libmlt-7.so"
 if [ -L "$LIBMLT7_LINK" ]; then
     LIBMLT7_TARGET="$(readlink "$LIBMLT7_LINK")"
     if [[ "$LIBMLT7_TARGET" == *"$PROJECT_LIBMLT"* || "$LIBMLT7_TARGET" == *"$REPO_DIR"* ]]; then
-        LIBMLT7_STATUS="[PROJECT] OliveMltBridge"
+        LIBMLT7_STATUS="[PROJECT] FastMelt"
     elif [[ "$LIBMLT7_TARGET" == "libmlt-7.so.7"* ]]; then
         LIBMLT7_STATUS="[ORIGINAL] Stock MLT"
     else

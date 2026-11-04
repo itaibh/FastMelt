@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Common configuration and helper functions for OliveMltBridge Flatpak switching
+# Common configuration and helper functions for FastMelt Flatpak switching
 
 set -euo pipefail
 

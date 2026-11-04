@@ -1,8 +1,8 @@
-# OliveMltBridge (Fast-Melt) — Requirements Specification
+# FastMelt — Requirements Specification
 
 ## 1. Executive Summary & Objective
 
-**OliveMltBridge** is a high-performance GPU-accelerated bridge and drop-in replacement for MLT (`melt` CLI and `libmlt.so`) in Kdenlive.
+**FastMelt** is a high-performance GPU-accelerated drop-in replacement for MLT (`melt` CLI and `libmlt.so`) in Kdenlive.
 
 ### 1.1 The Core Problem
 In stock Kdenlive, rendering and timeline evaluation are handled by the CPU-based MLT framework. Multi-track vertical HD timelines (e.g. animated lip-sync projects with 50+ tracks, 500+ layer blends, drop shadows, and 20px Gaussian blurs) suffer from severe rendering bottlenecks:
@@ -22,7 +22,7 @@ Accelerate render speeds from **~7 fps** to **45–60+ fps** by moving layer tra
 [ Kdenlive GUI / Flatpak ]
        │
        ▼ (Invokes: melt -loglevel error -progress2 %2Fvar%2Ftmp%2Fproject.mlt)
-[ OliveMltBridge CLI (target/release/melt) ]
+[ FastMelt CLI (target/release/melt) ]
        │
        ├──► [ XML Parser (roxmltree) ]
        │         Extracts: Profiles, Producers, Playlists, Tractors, Keyframe Rects,
@@ -63,7 +63,7 @@ Accelerate render speeds from **~7 fps** to **45–60+ fps** by moving layer tra
   <current_frame>\t<fps>\t<elapsed_seconds>
   ```
 - **FR-1.3 Path Decoding**: Must support and automatically decode URL-encoded file paths passed by Kdenlive (e.g., `%2Fvar%2Ftmp%2Fproject.mlt` -> `/var/tmp/project.mlt`).
-- **FR-1.4 Version Probing**: Must respond to `-version`, `--version`, and `-v` with MLT-compliant version strings (e.g., `melt 7.43.0 (OliveMltBridge vX.Y.Z)`) so Kdenlive startup and render configuration probes pass.
+- **FR-1.4 Version Probing**: Must respond to `-version`, `--version`, and `-v` with MLT-compliant version strings (e.g., `melt 7.43.0 (FastMelt vX.Y.Z)`) so Kdenlive startup and render configuration probes pass.
 - **FR-1.5 Logging Flags**: Must accept `-loglevel <error|warning|info|debug>` and standard MLT flags without failing.
 
 ### FR-2: MLT XML Project Parsing
@@ -122,7 +122,7 @@ Accelerate render speeds from **~7 fps** to **45–60+ fps** by moving layer tra
   - `mlt_consumer_start`, `mlt_consumer_stop`
 
 ### FR-7: Observability & Diagnostics
-- **FR-7.1 Dedicated Log File**: Record all invocations, timestamps, PIDs, raw CLI arguments, parsed XML stats, and execution timings in `olive_mlt.log`.
+- **FR-7.1 Dedicated Log File**: Record all invocations, timestamps, PIDs, raw CLI arguments, parsed XML stats, and execution timings in `fastmelt.log` (or `olive_mlt.log`).
 - **FR-7.2 Version Stamping**: Every binary build must carry a bumped version string (`v0.1.X`), logged on every invocation header.
 - **FR-7.3 Status Scripting**: Maintain `./switch.sh status` to inspect current symlinks and binary targets.
 
@@ -155,7 +155,7 @@ Accelerate render speeds from **~7 fps** to **45–60+ fps** by moving layer tra
 ## 6. Phased Implementation Plan & Milestones
 
 ### Phase 1: Hardware Encoder Sink & Direct Video Generation [COMPLETED]
-- **Goal**: Enable `OliveMltBridge` to produce real `.mp4` video files directly without falling back to stock `melt-7`.
+- **Goal**: Enable `FastMelt` to produce real `.mp4` video files directly without falling back to stock `melt-7`.
 - **Implementation**:
   - Connect `FrameBuffer` to a hardware-accelerated FFmpeg VA-API consumer subprocess (`ffmpeg -f rawvideo -pix_fmt rgba -s <w>x<h> -r <fps> -i - -vaapi_device /dev/dri/renderD128 -vf 'format=nv12,hwupload' -c:v h264_vaapi <target>`).
   - Feed composited frames into the encoder pipe sequentially.

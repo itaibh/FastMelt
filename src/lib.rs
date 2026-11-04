@@ -21,7 +21,7 @@ pub use pipeline::FrameBuffer;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub fn initialize() {
-    logger::log_msg("CORE", &format!("OliveMltBridge core initialized (v{})", VERSION));
+    logger::log_msg("CORE", &format!("FastMelt core initialized (v{})", VERSION));
 }
 
 
