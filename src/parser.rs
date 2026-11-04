@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use roxmltree::Document;
 
@@ -87,6 +87,13 @@ pub enum FilterType {
         color: [u8; 4],
         amount: f32,
     },
+    Wave {
+        factor_keyframes: Vec<(u64, f32)>,
+        speed_keyframes: Vec<(u64, f32)>,
+        deform_x: bool,
+        deform_y: bool,
+    },
+    Transparency(Vec<(u64, f32)>),
     Subtitles(String),
     HorizontalFlip,
     Passthrough(String),
@@ -173,11 +180,27 @@ pub struct Track {
 }
 
 #[derive(Debug, Clone)]
+pub struct Transition {
+    pub id: String,
+    pub in_frame: u64,
+    pub out_frame: u64,
+    pub a_track: usize,
+    pub b_track: usize,
+    pub mlt_service: String,
+    pub kdenlive_id: String,
+    pub luma: Option<String>,
+    pub softness: f32,
+    pub luma_invert: bool,
+    pub geometry_keyframes: Vec<KeyframeRect>,
+}
+
+#[derive(Debug, Clone)]
 pub struct Tractor {
     pub id: String,
     pub in_frame: u64,
     pub out_frame: u64,
     pub tracks: Vec<Track>,
+    pub transitions: Vec<Transition>,
     pub filters: Vec<Filter>,
     pub is_audio: bool,
 }
@@ -420,11 +443,66 @@ impl MltProject {
                             .unwrap_or(0);
 
                         let mut tracks = Vec::new();
+                        let mut transitions = Vec::new();
                         for child in node.children() {
                             if child.tag_name().name() == "track" {
                                 let producer_id = child.attribute("producer").unwrap_or("").to_string();
                                 let hide = child.attribute("hide").map(|s| s.to_string());
                                 tracks.push(Track { producer_id, hide });
+                            } else if child.tag_name().name() == "transition" {
+                                let trans_id = child.attribute("id").unwrap_or("").to_string();
+                                let t_in = child.attribute("in")
+                                    .map(|s| Self::parse_time_str(s, project.profile.frame_rate_num, project.profile.frame_rate_den))
+                                    .unwrap_or(0);
+                                let t_out = child.attribute("out")
+                                    .map(|s| Self::parse_time_str(s, project.profile.frame_rate_num, project.profile.frame_rate_den))
+                                    .unwrap_or(0);
+
+                                let mut a_track = 0;
+                                let mut b_track = 0;
+                                let mut mlt_service = String::new();
+                                let mut kdenlive_id = String::new();
+                                let mut luma = None;
+                                let mut softness = 0.0f32;
+                                let mut luma_invert = false;
+                                let mut geometry_str = String::new();
+
+                                for prop in child.children().filter(|c| c.tag_name().name() == "property") {
+                                    if let Some(name) = prop.attribute("name") {
+                                        let val = prop.text().unwrap_or("").trim();
+                                        match name {
+                                            "a_track" => a_track = val.parse().unwrap_or(0),
+                                            "b_track" => b_track = val.parse().unwrap_or(0),
+                                            "mlt_service" => mlt_service = val.to_string(),
+                                            "kdenlive_id" => kdenlive_id = val.to_string(),
+                                            "luma" => luma = Some(val.to_string()),
+                                            "softness" => softness = val.parse().unwrap_or(0.0),
+                                            "luma_invert" => luma_invert = val == "1" || val.eq_ignore_ascii_case("true"),
+                                            "geometry" => geometry_str = val.to_string(),
+                                            _ => {}
+                                        }
+                                    }
+                                }
+
+                                let geometry_keyframes = if !geometry_str.is_empty() {
+                                    Self::parse_rect_keyframes(&geometry_str, project.profile.frame_rate_num, project.profile.frame_rate_den)
+                                } else {
+                                    Vec::new()
+                                };
+
+                                transitions.push(Transition {
+                                    id: trans_id,
+                                    in_frame: t_in,
+                                    out_frame: t_out,
+                                    a_track,
+                                    b_track,
+                                    mlt_service,
+                                    kdenlive_id,
+                                    luma,
+                                    softness,
+                                    luma_invert,
+                                    geometry_keyframes,
+                                });
                             }
                         }
                         let filters = Self::parse_filters(node, project.profile.frame_rate_num, project.profile.frame_rate_den);
@@ -446,6 +524,7 @@ impl MltProject {
                             in_frame,
                             out_frame,
                             tracks,
+                            transitions,
                             filters,
                             is_audio,
                         });
@@ -561,31 +640,51 @@ impl MltProject {
         (start, end)
     }
 
-    /// Finds any active subtitle file attached to root or nested tractors
-    pub fn get_subtitle_file(&self) -> Option<PathBuf> {
-        // First check root tractor
-        if let Some(ref root_id) = self.root_tractor_id {
-            if let Some(root_t) = self.tractors.get(root_id) {
-                for f in &root_t.filters {
-                    if let FilterType::Subtitles(ref s) = f.filter_type {
-                        if !s.is_empty() {
-                            return Some(PathBuf::from(s));
-                        }
-                    }
-                }
-            }
+    fn find_subtitles_in_tractor(&self, tractor_id: &str, visited: &mut HashSet<String>) -> Option<String> {
+        if !visited.insert(tractor_id.to_string()) {
+            return None;
         }
-        // Check any tractor
-        for t in self.tractors.values() {
+        if let Some(t) = self.tractors.get(tractor_id) {
             for f in &t.filters {
                 if let FilterType::Subtitles(ref s) = f.filter_type {
                     if !s.is_empty() {
-                        return Some(PathBuf::from(s));
+                        return Some(s.clone());
                     }
+                }
+            }
+            for track in &t.tracks {
+                if let Some(sub) = self.find_subtitles_in_tractor(&track.producer_id, visited) {
+                    return Some(sub);
                 }
             }
         }
         None
+    }
+
+    /// Finds any active subtitle file attached to root or nested active tractors
+    pub fn get_subtitle_file(&self, base_dir: Option<&Path>) -> Option<PathBuf> {
+        let mut visited = HashSet::new();
+        let sub_str = if let Some(ref root_id) = self.root_tractor_id {
+            self.find_subtitles_in_tractor(root_id, &mut visited)
+        } else {
+            None
+        };
+
+        sub_str.and_then(|s| {
+            let p = PathBuf::from(&s);
+            if p.exists() {
+                Some(p)
+            } else if let Some(base) = base_dir {
+                let joined = base.join(&s);
+                if joined.exists() {
+                    Some(joined)
+                } else {
+                    Some(p)
+                }
+            } else {
+                Some(p)
+            }
+        })
     }
 
     pub fn get_consumer_target(&self) -> Option<String> {
@@ -615,6 +714,11 @@ impl MltProject {
             let mut filename_str = String::new();
             let mut x_str = String::new();
             let mut y_str = String::new();
+            let mut wave_str = String::new();
+            let mut speed_str = String::new();
+            let mut deform_x_str = String::new();
+            let mut deform_y_str = String::new();
+            let mut transparency_str = String::new();
             let mut disabled = false;
 
             for prop in child.children().filter(|c| c.tag_name().name() == "property") {
@@ -635,6 +739,11 @@ impl MltProject {
                         "av.filename" | "filename" => filename_str = val.to_string(),
                         "x" => x_str = val.to_string(),
                         "y" => y_str = val.to_string(),
+                        "wave" | "start" => wave_str = val.to_string(),
+                        "speed" => speed_str = val.to_string(),
+                        "deformX" => deform_x_str = val.to_string(),
+                        "deformY" => deform_y_str = val.to_string(),
+                        "0" | "transparency" => transparency_str = val.to_string(),
                         _ => {}
                     }
                 }
@@ -653,6 +762,20 @@ impl MltProject {
                     rotate_center,
                     distort,
                 }
+            } else if service == "wave" {
+                let factor_keyframes = Self::parse_float_keyframes(&wave_str, fps_num, fps_den);
+                let speed_keyframes = Self::parse_float_keyframes(&speed_str, fps_num, fps_den);
+                let deform_x = deform_x_str == "1" || deform_x_str.eq_ignore_ascii_case("true");
+                let deform_y = deform_y_str == "1" || deform_y_str.eq_ignore_ascii_case("true");
+                FilterType::Wave {
+                    factor_keyframes,
+                    speed_keyframes,
+                    deform_x,
+                    deform_y,
+                }
+            } else if service == "frei0r.transparency" {
+                let keyframes = Self::parse_float_keyframes(&transparency_str, fps_num, fps_den);
+                FilterType::Transparency(keyframes)
             } else if service == "dropshadow" {
                 let radius = radius_str.split('=').last().unwrap_or("20").parse().unwrap_or(20.0);
                 let x_offset = x_str.split('=').last().unwrap_or("4").parse().unwrap_or(4.0);
@@ -707,7 +830,15 @@ impl MltProject {
             let time_part = pieces.next().unwrap_or("0").trim_end_matches('|');
             let frame = Self::parse_time_str(time_part, fps_num, fps_den);
             if let Some(coords) = pieces.next() {
-                let nums: Vec<f32> = coords.split_whitespace().filter_map(|s| s.parse().ok()).collect();
+                let nums: Vec<f32> = coords.split_whitespace().filter_map(|s| {
+                    let clean = s.trim_end_matches('%');
+                    let val: f32 = clean.parse().ok()?;
+                    if s.ends_with('%') {
+                        Some(val / 100.0)
+                    } else {
+                        Some(val)
+                    }
+                }).collect();
                 if nums.len() >= 4 {
                     keyframes.push(KeyframeRect {
                         frame,
@@ -721,7 +852,15 @@ impl MltProject {
             }
         }
         if keyframes.is_empty() {
-            let nums: Vec<f32> = rect_str.split_whitespace().filter_map(|s| s.parse().ok()).collect();
+            let nums: Vec<f32> = rect_str.split_whitespace().filter_map(|s| {
+                let clean = s.trim_end_matches('%');
+                let val: f32 = clean.parse().ok()?;
+                if s.ends_with('%') {
+                    Some(val / 100.0)
+                } else {
+                    Some(val)
+                }
+            }).collect();
             if nums.len() >= 4 {
                 keyframes.push(KeyframeRect {
                     frame: 0,

@@ -7,6 +7,7 @@ use crate::pipeline::FrameBuffer;
 pub struct TextureCache {
     cache: HashMap<PathBuf, RgbaImage>,
     processed_cache: HashMap<(PathBuf, Option<[u8; 4]>, u32, bool), RgbaImage>,
+    luma_cache: HashMap<PathBuf, (u32, u32, Vec<u8>)>,
 }
 
 impl TextureCache {
@@ -14,6 +15,7 @@ impl TextureCache {
         Self {
             cache: HashMap::new(),
             processed_cache: HashMap::new(),
+            luma_cache: HashMap::new(),
         }
     }
 
@@ -98,6 +100,37 @@ impl TextureCache {
         }
 
         self.processed_cache.get(&key)
+    }
+
+    pub fn get_or_load_luma(&mut self, path_str: &str) -> Option<&(u32, u32, Vec<u8>)> {
+        let candidates = [
+            PathBuf::from(path_str),
+            if path_str.starts_with("/app/") {
+                PathBuf::from(path_str.replacen("/app/", "/var/lib/flatpak/app/org.kde.kdenlive/current/active/files/", 1))
+            } else {
+                PathBuf::from(path_str)
+            },
+            PathBuf::from(format!("/usr/share/kdenlive/lumas/{}", path_str.split('/').last().unwrap_or(""))),
+        ];
+
+        let p = candidates.into_iter().find(|p| p.exists())?;
+
+        if !self.luma_cache.contains_key(&p) {
+            match image::open(&p) {
+                Ok(img) => {
+                    let gray = img.to_luma8();
+                    let w = gray.width();
+                    let h = gray.height();
+                    log_msg("CACHE", &format!("Loaded luma wipe map: {} ({}x{})", p.display(), w, h));
+                    self.luma_cache.insert(p.clone(), (w, h, gray.into_raw()));
+                }
+                Err(e) => {
+                    log_msg("CACHE", &format!("Failed to load luma map '{}': {}", p.display(), e));
+                    return None;
+                }
+            }
+        }
+        self.luma_cache.get(&p)
     }
 }
 

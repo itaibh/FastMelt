@@ -260,7 +260,7 @@ fn test_nested_mlt_producer_parsing() {
         _ => panic!("Expected ProducerSource::MltXml, got {:?}", prod.source),
     }
 
-    let sub_file = proj.get_subtitle_file();
+    let sub_file = proj.get_subtitle_file(None);
     assert_eq!(sub_file.unwrap().to_str().unwrap(), "/path/to/subs.ass");
 }
 
@@ -298,4 +298,54 @@ fn test_audio_xml_generation() {
     assert!(audio_xml.contains("track producer=\"playlist_audio\""));
     assert!(!audio_xml.contains("track producer=\"playlist_video\""));
     assert!(!audio_xml.contains("qtblend"));
+}
+
+#[test]
+fn test_wave_filter_distortion() {
+    let mut fb = FrameBuffer::new(100, 100);
+    // Draw horizontal line at y=50
+    for x in 0..100 {
+        let idx = (50 * 100 + x) * 4;
+        fb.data[idx] = 255;
+        fb.data[idx + 1] = 255;
+        fb.data[idx + 2] = 255;
+        fb.data[idx + 3] = 255;
+    }
+
+    // Apply vertical wave distortion
+    fb.apply_wave(0, 10.0, 5.0, false, true);
+
+    // The line at y=50 should now be distorted (not strictly at y=50 across all x)
+    let mut found_non_50 = false;
+    for y in 0..100 {
+        if y != 50 && fb.data[(y * 100 + 25) * 4] == 255 {
+            found_non_50 = true;
+            break;
+        }
+    }
+    assert!(found_non_50, "Wave filter should have displaced horizontal line");
+}
+
+#[test]
+fn test_luma_wipe_transition() {
+    let mut fb = FrameBuffer::new(10, 10);
+    fb.clear([255, 255, 255, 255]);
+
+    // Create a 10x10 gradient luma map from 0 to 255
+    let mut luma = vec![0u8; 100];
+    for y in 0..10 {
+        for x in 0..10 {
+            luma[y * 10 + x] = ((x as f32 / 9.0) * 255.0) as u8;
+        }
+    }
+
+    // At progress 0.0 with low softness, pixels should be mostly 0 alpha
+    let mut fb_0 = fb.clone();
+    fb_0.apply_luma_wipe(&luma, 10, 10, 0.0, 0.05, false);
+    assert_eq!(fb_0.data[(5 * 10 + 9) * 4 + 3], 0);
+
+    // At progress 1.0, pixels should be full alpha
+    let mut fb_1 = fb.clone();
+    fb_1.apply_luma_wipe(&luma, 10, 10, 1.0, 0.05, false);
+    assert_eq!(fb_1.data[(5 * 10 + 0) * 4 + 3], 255);
 }

@@ -9,6 +9,7 @@ use mlt_7::VERSION;
 use std::env;
 use std::fs;
 use std::io::{self, Write};
+use std::path::Path;
 use std::time::Instant;
 
 fn main() {
@@ -207,7 +208,8 @@ fn main() {
                 width, height, fps_num, fps_den, start_frame, end_frame, total_frames, target
             ));
 
-            let sub_file = proj.get_subtitle_file();
+            let proj_dir = Path::new(&resolved_path).parent();
+            let sub_file = proj.get_subtitle_file(proj_dir);
 
             // Check if project has audio tracks to render
             let has_audio = mlt_7::audio::has_audio_content(proj);

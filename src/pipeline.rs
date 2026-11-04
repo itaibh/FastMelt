@@ -2,6 +2,7 @@ use image::RgbaImage;
 use rayon::prelude::*;
 use glam::{vec2, Affine2};
 
+#[derive(Clone)]
 pub struct FrameBuffer {
     pub width: u32,
     pub height: u32,
@@ -626,5 +627,100 @@ impl FrameBuffer {
 
             self.blend_raw(&sil, sh_w, sh_h, dst_x - pad_i32, dst_y - pad_i32, sh_w, sh_h, eff_opacity);
         }
+    }
+
+    /// Blend another FrameBuffer onto self with given opacity
+    pub fn blend_framebuffer(&mut self, other: &FrameBuffer, opacity: f32) {
+        if opacity <= 0.001 {
+            return;
+        }
+        self.blend_raw(
+            &other.data,
+            other.width,
+            other.height,
+            0,
+            0,
+            other.width,
+            other.height,
+            opacity,
+        );
+    }
+
+    /// Sine wave distortion effect matching MLT filter_wave.c
+    pub fn apply_wave(
+        &mut self,
+        position: u64,
+        factor: f32,
+        speed: f32,
+        deform_x: bool,
+        deform_y: bool,
+    ) {
+        if factor <= 0.0 || (!deform_x && !deform_y) {
+            return;
+        }
+        let w = self.width as i32;
+        let h = self.height as i32;
+        let amplitude = factor;
+        let pulsation = 0.5 / factor;
+        let phase = (position as f32) * pulsation * speed / 10.0;
+        let src = self.data.clone();
+
+        self.data
+            .par_chunks_exact_mut((w as usize) * 4)
+            .enumerate()
+            .for_each(|(y_idx, row)| {
+                let y = y_idx as i32;
+                let decal_x = if deform_x {
+                    ((pulsation * y as f32 + phase).sin() * amplitude).round() as i32
+                } else {
+                    0
+                };
+                for x in 0..w {
+                    let decal_y = if deform_y {
+                        ((pulsation * x as f32 + phase).sin() * amplitude).round() as i32
+                    } else {
+                        0
+                    };
+                    let sx = (x + decal_x).rem_euclid(w);
+                    let sy = (y + decal_y).rem_euclid(h);
+                    let src_idx = ((sy * w + sx) * 4) as usize;
+                    let dst_slice = &mut row[(x as usize) * 4..(x as usize + 1) * 4];
+                    dst_slice.copy_from_slice(&src[src_idx..src_idx + 4]);
+                }
+            });
+    }
+
+    /// Luma wipe transition alpha mask matching MLT composite/wipe
+    pub fn apply_luma_wipe(
+        &mut self,
+        luma_map: &[u8],
+        luma_w: u32,
+        luma_h: u32,
+        progress: f32,
+        softness: f32,
+        invert: bool,
+    ) {
+        let w = self.width as usize;
+        let h = self.height as usize;
+        let lw = luma_w as usize;
+        let lh = luma_h as usize;
+        let soft = softness.max(0.001);
+        let prog = if invert { 1.0 - progress } else { progress };
+
+        self.data
+            .par_chunks_exact_mut(w * 4)
+            .enumerate()
+            .for_each(|(y, row)| {
+                let ly = (y * lh / h).min(lh - 1);
+                let luma_row = &luma_map[ly * lw..(ly + 1) * lw];
+                for x in 0..w {
+                    let lx = (x * lw / w).min(lw - 1);
+                    let l_val = luma_row[lx] as f32 / 255.0;
+                    let diff = prog - l_val;
+                    let alpha_mult = ((diff + soft / 2.0) / soft).clamp(0.0, 1.0);
+                    let px = &mut row[x * 4..(x + 1) * 4];
+                    px[3] = (px[3] as f32 * alpha_mult).round() as u8;
+                }
+            });
     }
 }

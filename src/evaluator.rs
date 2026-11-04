@@ -48,32 +48,59 @@ impl<'a> TimelineEvaluator<'a> {
         }
 
         // Iterate tracks from bottom (0) to top
-        for track in &tractor.tracks {
+        for (track_idx, track) in tractor.tracks.iter().enumerate() {
             if let Some(ref hide) = track.hide {
                 if hide == "video" || hide == "both" {
                     continue;
                 }
             }
 
-            let prod_id = &track.producer_id;
+            let active_transition = tractor.transitions.iter().find(|tr| {
+                tr.b_track == track_idx && frame >= tr.in_frame && (tr.out_frame == 0 || frame <= tr.out_frame)
+            });
 
-            // Track can point to:
-            // 1. A Playlist
-            if let Some(playlist) = self.project.playlists.get(prod_id) {
-                if !playlist.is_audio {
-                    self.render_playlist(playlist, frame, fb, depth);
+            if let Some(tr) = active_transition {
+                let mut track_fb = FrameBuffer::new(fb.width, fb.height);
+                self.render_track_content(&track.producer_id, frame, &mut track_fb, depth);
+
+                if let Some(ref luma_path) = tr.luma {
+                    if let Some(&(lw, lh, ref luma_bytes)) = self.cache.get_or_load_luma(luma_path) {
+                        let rel_frame = frame.saturating_sub(tr.in_frame);
+                        let progress = if !tr.geometry_keyframes.is_empty() {
+                            let (_, _, _, _, op) = KeyframeRect::interpolate(&tr.geometry_keyframes, rel_frame);
+                            op
+                        } else {
+                            let total = (tr.out_frame.saturating_sub(tr.in_frame)).max(1) as f32;
+                            (rel_frame as f32 / total).clamp(0.0, 1.0)
+                        };
+
+                        track_fb.apply_luma_wipe(luma_bytes, lw, lh, progress, tr.softness, tr.luma_invert);
+                    }
                 }
+                fb.blend_framebuffer(&track_fb, 1.0);
+            } else {
+                self.render_track_content(&track.producer_id, frame, fb, depth);
             }
-            // 2. Another Tractor directly
-            else if let Some(sub_tractor) = self.project.tractors.get(prod_id) {
-                if !sub_tractor.is_audio {
-                    self.render_tractor(prod_id, frame, fb, depth + 1);
-                }
+        }
+    }
+
+    fn render_track_content(&mut self, prod_id: &str, frame: u64, fb: &mut FrameBuffer, depth: u32) {
+        // Track can point to:
+        // 1. A Playlist
+        if let Some(playlist) = self.project.playlists.get(prod_id) {
+            if !playlist.is_audio {
+                self.render_playlist(playlist, frame, fb, depth);
             }
-            // 3. A Producer directly
-            else if let Some(producer) = self.project.producers.get(prod_id) {
-                self.render_producer(producer, frame, None, fb, depth);
+        }
+        // 2. Another Tractor directly
+        else if let Some(sub_tractor) = self.project.tractors.get(prod_id) {
+            if !sub_tractor.is_audio {
+                self.render_tractor(prod_id, frame, fb, depth + 1);
             }
+        }
+        // 3. A Producer directly
+        else if let Some(producer) = self.project.producers.get(prod_id) {
+            self.render_producer(producer, frame, frame, None, fb, depth);
         }
     }
 
@@ -127,7 +154,7 @@ impl<'a> TimelineEvaluator<'a> {
             }
             // Or if entry points to a producer
             else if let Some(producer) = self.project.producers.get(prod_id) {
-                self.render_producer(producer, clip_frame, Some(&entry.filters), fb, depth);
+                self.render_producer(producer, timeline_frame, clip_frame, Some(&entry.filters), fb, depth);
             }
         }
     }
@@ -135,6 +162,7 @@ impl<'a> TimelineEvaluator<'a> {
     fn render_producer(
         &mut self,
         producer: &crate::parser::Producer,
+        timeline_frame: u64,
         clip_frame: u64,
         extra_filters: Option<&[crate::parser::Filter]>,
         fb: &mut FrameBuffer,
@@ -155,6 +183,8 @@ impl<'a> TimelineEvaluator<'a> {
                 let mut gaussian_blur = None;
                 let mut tint = None;
                 let mut hflip = false;
+                let mut wave_filter = None;
+                let mut transparency_opacity = 1.0f32;
 
                 for f in &all_filters {
                     match &f.filter_type {
@@ -175,6 +205,16 @@ impl<'a> TimelineEvaluator<'a> {
                         }
                         FilterType::HorizontalFlip => {
                             hflip = true;
+                        }
+                        FilterType::Wave { factor_keyframes, speed_keyframes, deform_x, deform_y } => {
+                            let factor = MltProject::interpolate_float(factor_keyframes, clip_frame);
+                            let speed = MltProject::interpolate_float(speed_keyframes, clip_frame);
+                            if factor > 0.0 {
+                                wave_filter = Some((factor, speed, *deform_x, *deform_y));
+                            }
+                        }
+                        FilterType::Transparency(ref kfs) => {
+                            transparency_opacity *= MltProject::interpolate_float(kfs, clip_frame);
                         }
                         _ => {}
                     }
@@ -231,56 +271,116 @@ impl<'a> TimelineEvaluator<'a> {
                         )
                     });
 
-                    // 2. Resolve Playlist entry-level transform
-                    // Timeline entry transforms operate in canvas coordinate space (1080x1920)
-                    let mut entry_matrix = None;
+                    // 2. Resolve Playlist entry-level transforms
+                    let prod_dar = src_w as f32 / src_h as f32;
+                    let mut current_matrix = m1;
                     let mut entry_opacity = 1.0f32;
 
                     if let Some(extras) = extra_filters {
-                        // Find active non-identity qtblend (prioritize specific transforms over 0 0 1080 1920)
-                        let mut candidates = Vec::new();
+                        let mut qtblends = Vec::new();
                         for f in extras {
                             if let FilterType::QtBlend { rect_keyframes, rotation_keyframes, rotate_center, distort } = &f.filter_type {
                                 let (rx, ry, rw, rh, op) = KeyframeRect::interpolate(rect_keyframes, clip_frame);
                                 let rot = MltProject::interpolate_float(rotation_keyframes, clip_frame);
-                                let is_ident = rot.abs() <= 0.001
-                                    && rx.abs() <= 0.001
-                                    && ry.abs() <= 0.001
+                                let is_full_canvas = rx.abs() <= 1.0
+                                    && ry.abs() <= 1.0
                                     && (rw - canvas_w).abs() <= 1.0
                                     && (rh - canvas_h).abs() <= 1.0;
-                                candidates.push((rx, ry, rw, rh, op, rot, *rotate_center, *distort, is_ident));
+                                qtblends.push((rx, ry, rw, rh, op, rot, *rotate_center, *distort, is_full_canvas));
                             }
                         }
 
-                        // Pick the first non-identity transform, or fallback to the last transform
-                        if let Some(&(rx, ry, rw, rh, op, rot, rc, dist, is_ident)) = candidates.iter().find(|c| !c.8).or_else(|| candidates.last()) {
-                            entry_opacity = op;
-                            if !is_ident {
-                                entry_matrix = Some((rx, ry, rw, rh, rot, rc, dist));
+                        if !qtblends.is_empty() {
+                            let non_canvas_count = qtblends.iter().filter(|c| !c.8).count();
+
+                            if non_canvas_count == 1 {
+                                let &specific = qtblends.iter().find(|c| !c.8).unwrap();
+                                let m_place = FrameBuffer::build_affine_matrix_with_dar(
+                                    canvas_w,
+                                    canvas_h,
+                                    specific.0,
+                                    specific.1,
+                                    specific.2,
+                                    specific.3,
+                                    specific.5,
+                                    specific.6,
+                                    specific.7,
+                                    Some(prod_dar),
+                                );
+                                current_matrix = m_place * current_matrix;
+                                entry_opacity *= specific.4;
+
+                                for c in &qtblends {
+                                    if c.8 && c.5.abs() > 0.001 {
+                                        let m_rot = FrameBuffer::build_affine_matrix_with_dar(
+                                            canvas_w,
+                                            canvas_h,
+                                            c.0,
+                                            c.1,
+                                            c.2,
+                                            c.3,
+                                            c.5,
+                                            c.6,
+                                            c.7,
+                                            None,
+                                        );
+                                        current_matrix = m_rot * current_matrix;
+                                        entry_opacity *= c.4;
+                                    }
+                                }
+                            } else if non_canvas_count > 1 {
+                                let mut first = true;
+                                for c in &qtblends {
+                                    if c.8 && c.5.abs() <= 0.001 && (c.4 - 1.0).abs() <= 0.001 {
+                                        continue;
+                                    }
+                                    let dar = if first {
+                                        first = false;
+                                        Some(prod_dar)
+                                    } else {
+                                        None
+                                    };
+                                    let m_step = FrameBuffer::build_affine_matrix_with_dar(
+                                        canvas_w,
+                                        canvas_h,
+                                        c.0,
+                                        c.1,
+                                        c.2,
+                                        c.3,
+                                        c.5,
+                                        c.6,
+                                        c.7,
+                                        dar,
+                                    );
+                                    current_matrix = m_step * current_matrix;
+                                    entry_opacity *= c.4;
+                                }
+                            } else {
+                                for c in &qtblends {
+                                    if c.5.abs() > 0.001 || (c.4 - 1.0).abs() > 0.001 {
+                                        let m_rot = FrameBuffer::build_affine_matrix_with_dar(
+                                            canvas_w,
+                                            canvas_h,
+                                            c.0,
+                                            c.1,
+                                            c.2,
+                                            c.3,
+                                            c.5,
+                                            c.6,
+                                            c.7,
+                                            None,
+                                        );
+                                        current_matrix = m_rot * current_matrix;
+                                        entry_opacity *= c.4;
+                                    }
+                                }
                             }
                         }
                     }
 
                     // 3. Compose final affine matrix
-                    let (composite_matrix, total_opacity) = match entry_matrix {
-                        Some((rx2, ry2, rw2, rh2, rot2, rc2, dist2)) => {
-                            let prod_dar = src_w as f32 / src_h as f32;
-                            let m2 = FrameBuffer::build_affine_matrix_with_dar(
-                                canvas_w,
-                                canvas_h,
-                                rx2,
-                                ry2,
-                                rw2,
-                                rh2,
-                                rot2,
-                                rc2,
-                                dist2,
-                                Some(prod_dar),
-                            );
-                            (m2 * m1, prod_opacity * entry_opacity)
-                        }
-                        None => (m1, prod_opacity * entry_opacity),
-                    };
+                    let composite_matrix = current_matrix;
+                    let total_opacity = prod_opacity * entry_opacity * transparency_opacity;
 
                     // 4. Render drop shadow if present
                     if let Some((radius, x_off, y_off, color)) = drop_shadow {
@@ -304,14 +404,27 @@ impl<'a> TimelineEvaluator<'a> {
                         );
                     }
 
-                    // 5. Blend processed image with composite matrix
-                    fb.blend_affine_matrix(
-                        img.as_raw(),
-                        src_w,
-                        src_h,
-                        composite_matrix,
-                        total_opacity,
-                    );
+                    // 5. Blend processed image with composite matrix (with optional wave distortion)
+                    if let Some((factor, speed, def_x, def_y)) = wave_filter {
+                        let mut clip_fb = FrameBuffer::new(fb.width, fb.height);
+                        clip_fb.blend_affine_matrix(
+                            img.as_raw(),
+                            src_w,
+                            src_h,
+                            composite_matrix,
+                            total_opacity,
+                        );
+                        clip_fb.apply_wave(timeline_frame, factor, speed, def_x, def_y);
+                        fb.blend_framebuffer(&clip_fb, 1.0);
+                    } else {
+                        fb.blend_affine_matrix(
+                            img.as_raw(),
+                            src_w,
+                            src_h,
+                            composite_matrix,
+                            total_opacity,
+                        );
+                    }
                 }
             }
             ProducerSource::Color(color) => {
