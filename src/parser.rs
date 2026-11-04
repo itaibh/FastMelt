@@ -96,6 +96,7 @@ pub enum FilterType {
     Transparency(Vec<(u64, f32)>),
     Subtitles(String),
     HorizontalFlip,
+    Audio(String),
     Passthrough(String),
 }
 
@@ -103,6 +104,13 @@ pub enum FilterType {
 pub struct Filter {
     pub id: String,
     pub filter_type: FilterType,
+    pub raw_xml: String,
+}
+
+impl Filter {
+    pub fn is_unsupported_video_filter(&self) -> bool {
+        matches!(self.filter_type, FilterType::Passthrough(_))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -112,6 +120,10 @@ pub enum ProducerSource {
     Video(PathBuf),
     MltXml(PathBuf),
     NestedTractor(String),
+    Passthrough {
+        service: String,
+        resource: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -120,6 +132,42 @@ pub struct Producer {
     pub source: ProducerSource,
     pub duration_frames: u64,
     pub filters: Vec<Filter>,
+    pub raw_xml: String,
+}
+
+impl Producer {
+    pub fn is_static(&self) -> bool {
+        match &self.source {
+            ProducerSource::Image(_) | ProducerSource::Color(_) => {
+                !self.filters.iter().any(|f| match &f.filter_type {
+                    FilterType::QtBlend { rect_keyframes, rotation_keyframes, .. } => {
+                        rect_keyframes.len() > 1 || rotation_keyframes.len() > 1
+                    }
+                    FilterType::Wave { factor_keyframes, speed_keyframes, .. } => {
+                        factor_keyframes.len() > 1 || speed_keyframes.len() > 1
+                    }
+                    FilterType::Transparency(kfs) => kfs.len() > 1,
+                    _ => false,
+                })
+            }
+            _ => false,
+        }
+    }
+
+    pub fn needs_passthrough(&self, extra_filters: Option<&[Filter]>) -> bool {
+        if matches!(self.source, ProducerSource::Passthrough { .. } | ProducerSource::Video(_)) {
+            return true;
+        }
+        if self.filters.iter().any(|f| f.is_unsupported_video_filter()) {
+            return true;
+        }
+        if let Some(extras) = extra_filters {
+            if extras.iter().any(|f| f.is_unsupported_video_filter()) {
+                return true;
+            }
+        }
+        false
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -192,6 +240,29 @@ pub struct Transition {
     pub softness: f32,
     pub luma_invert: bool,
     pub geometry_keyframes: Vec<KeyframeRect>,
+    pub raw_xml: String,
+}
+
+impl Transition {
+    pub fn is_supported(&self) -> bool {
+        // Internal mixing transitions (without in/out or with always_active)
+        if self.out_frame <= self.in_frame {
+            return true;
+        }
+        // Wipe transitions
+        if self.luma.is_some() || self.kdenlive_id == "wipe" || self.mlt_service == "luma" {
+            return true;
+        }
+        // Mix / Dissolve transitions
+        if self.kdenlive_id == "mix" || self.kdenlive_id == "dissolve" || self.mlt_service == "mix" {
+            return true;
+        }
+        // Standard composition
+        if self.mlt_service == "qtblend" {
+            return true;
+        }
+        false
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -344,6 +415,7 @@ impl MltProject {
                     if let Some(id) = node.attribute("id") {
                         let mut resource = String::new();
                         let mut service = String::new();
+                        let mut colour_val = String::new();
 
                         for prop in node.children().filter(|c| c.tag_name().name() == "property") {
                             if let Some(name) = prop.attribute("name") {
@@ -352,6 +424,8 @@ impl MltProject {
                                     resource = val.to_string();
                                 } else if name == "mlt_service" {
                                     service = val.to_string();
+                                } else if name == "colour" || name == "color" {
+                                    colour_val = val.to_string();
                                 }
                             }
                         }
@@ -366,22 +440,30 @@ impl MltProject {
                             || resource.ends_with(".kdenlive");
 
                         let source = if is_image {
-                            ProducerSource::Image(PathBuf::from(resource))
-                        } else if service == "color" {
-                            ProducerSource::Color(Self::parse_color_str(&resource))
+                            ProducerSource::Image(PathBuf::from(&resource))
+                        } else if service == "color" || service == "colour" {
+                            let c_str = if !colour_val.is_empty() { &colour_val } else { &resource };
+                            ProducerSource::Color(Self::parse_color_str(c_str))
                         } else if is_xml {
-                            ProducerSource::MltXml(PathBuf::from(resource))
+                            ProducerSource::MltXml(PathBuf::from(&resource))
+                        } else if service == "avformat" || resource.ends_with(".mp4") || resource.ends_with(".mov") || resource.ends_with(".mkv") || resource.ends_with(".avi") || resource.ends_with(".webm") {
+                            ProducerSource::Video(PathBuf::from(&resource))
                         } else {
-                            ProducerSource::Video(PathBuf::from(resource))
+                            ProducerSource::Passthrough {
+                                service: service.clone(),
+                                resource: resource.clone(),
+                            }
                         };
 
-                        let filters = Self::parse_filters(node, project.profile.frame_rate_num, project.profile.frame_rate_den);
+                        let raw_xml = xml_content[node.range()].to_string();
+                        let filters = Self::parse_filters(node, xml_content, project.profile.frame_rate_num, project.profile.frame_rate_den);
 
                         project.producers.insert(id.to_string(), Producer {
                             id: id.to_string(),
                             source,
                             duration_frames: 1000,
                             filters,
+                            raw_xml,
                         });
                     }
                 }
@@ -414,7 +496,7 @@ impl MltProject {
                                     let out_frame = child.attribute("out")
                                         .map(|s| Self::parse_time_str(s, project.profile.frame_rate_num, project.profile.frame_rate_den))
                                         .unwrap_or(0);
-                                    let filters = Self::parse_filters(child, project.profile.frame_rate_num, project.profile.frame_rate_den);
+                                    let filters = Self::parse_filters(child, xml_content, project.profile.frame_rate_num, project.profile.frame_rate_den);
 
                                     items.push(PlaylistItem::Entry(PlaylistEntry {
                                         producer_id,
@@ -451,6 +533,7 @@ impl MltProject {
                                 tracks.push(Track { producer_id, hide });
                             } else if child.tag_name().name() == "transition" {
                                 let trans_id = child.attribute("id").unwrap_or("").to_string();
+                                let trans_raw_xml = xml_content[child.range()].to_string();
                                 let t_in = child.attribute("in")
                                     .map(|s| Self::parse_time_str(s, project.profile.frame_rate_num, project.profile.frame_rate_den))
                                     .unwrap_or(0);
@@ -502,10 +585,11 @@ impl MltProject {
                                     softness,
                                     luma_invert,
                                     geometry_keyframes,
+                                    raw_xml: trans_raw_xml,
                                 });
                             }
                         }
-                        let filters = Self::parse_filters(node, project.profile.frame_rate_num, project.profile.frame_rate_den);
+                        let filters = Self::parse_filters(node, xml_content, project.profile.frame_rate_num, project.profile.frame_rate_den);
                         let mut is_audio = false;
 
                         // Check properties
@@ -697,10 +781,37 @@ impl MltProject {
         })
     }
 
-    fn parse_filters(parent: roxmltree::Node, fps_num: u32, fps_den: u32) -> Vec<Filter> {
+    /// Checks if project contains unsupported tractor-level transitions or filters that require full upstream MLT rendering.
+    pub fn check_unsupported_tractor_features(&self) -> Option<String> {
+        for (tid, tractor) in &self.tractors {
+            if tractor.is_audio {
+                continue;
+            }
+            for tr in &tractor.transitions {
+                if !tr.is_supported() {
+                    return Some(format!(
+                        "Unsupported transition '{}' (service='{}', kdenlive_id='{}') in tractor '{}'",
+                        tr.id, tr.mlt_service, tr.kdenlive_id, tid
+                    ));
+                }
+            }
+            for f in &tractor.filters {
+                if f.is_unsupported_video_filter() {
+                    return Some(format!(
+                        "Unsupported tractor filter '{}' in tractor '{}'",
+                        f.id, tid
+                    ));
+                }
+            }
+        }
+        None
+    }
+
+    fn parse_filters(parent: roxmltree::Node, xml_content: &str, fps_num: u32, fps_den: u32) -> Vec<Filter> {
         let mut filters = Vec::new();
         for child in parent.children().filter(|c| c.tag_name().name() == "filter") {
             let id = child.attribute("id").unwrap_or("").to_string();
+            let raw_xml = xml_content[child.range()].to_string();
             let mut service = String::new();
             let mut rect_str = String::new();
             let mut rotation_str = String::new();
@@ -752,6 +863,15 @@ impl MltProject {
             if disabled {
                 continue;
             }
+
+            let is_audio = service == "volume"
+                || service == "panner"
+                || service == "audiolevel"
+                || service.starts_with("ladspa")
+                || service.starts_with("sox")
+                || service == "channelcopy"
+                || service == "mono"
+                || service == "stereo";
 
             let filter_type = if service == "qtblend" {
                 let keyframes = Self::parse_rect_keyframes(&rect_str, fps_num, fps_den);
@@ -809,6 +929,8 @@ impl MltProject {
                 };
                 let sigma = s_str.split('=').last().unwrap_or("5.0").trim().parse().unwrap_or(5.0);
                 FilterType::GaussianBlur { sigma }
+            } else if is_audio {
+                FilterType::Audio(service.clone())
             } else {
                 FilterType::Passthrough(service.clone())
             };
@@ -816,6 +938,7 @@ impl MltProject {
             filters.push(Filter {
                 id,
                 filter_type,
+                raw_xml,
             });
         }
         filters

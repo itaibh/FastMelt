@@ -95,5 +95,79 @@ impl UpstreamMlt {
         Ok(code)
     }
 
+    /// Renders a single frame for an isolated producer and its filters into an RgbaImage using upstream melt.
+    pub fn render_producer_frame(
+        profile: &crate::parser::Profile,
+        producer_xml: &str,
+        extra_filters_xml: &[String],
+        producer_id: &str,
+        frame: u64,
+        root_dir: Option<&std::path::Path>,
+    ) -> Option<image::RgbaImage> {
+        let tmp_dir = std::env::temp_dir();
+        let unique_id = format!("mlt_pt_{}_{}_{}", std::process::id(), producer_id, frame);
+        let tmp_xml_path = tmp_dir.join(format!("{}.mlt", unique_id));
+
+        let filters_block = extra_filters_xml.join("\n");
+        let xml_content = format!(
+            r#"<mlt>
+  <profile width="{w}" height="{h}" frame_rate_num="{fps_n}" frame_rate_den="{fps_d}" display_aspect_num="{dar_n}" display_aspect_den="{dar_d}" />
+  {prod_xml}
+  <playlist id="pt_pl">
+    <entry producer="{prod_id}" in="{frame}" out="{frame}">
+      {filters_block}
+    </entry>
+  </playlist>
+  <tractor id="pt_root">
+    <track producer="pt_pl"/>
+  </tractor>
+</mlt>"#,
+            w = profile.width,
+            h = profile.height,
+            fps_n = profile.frame_rate_num,
+            fps_d = profile.frame_rate_den,
+            dar_n = profile.display_aspect_num,
+            dar_d = profile.display_aspect_den,
+            prod_xml = producer_xml,
+            prod_id = producer_id,
+            frame = frame,
+            filters_block = filters_block
+        );
+
+        if std::fs::write(&tmp_xml_path, xml_content).is_err() {
+            return None;
+        }
+
+        let args = [
+            tmp_xml_path.to_str()?.to_string(),
+            "-consumer".to_string(),
+            "avformat:pipe:1".to_string(),
+            "f=rawvideo".to_string(),
+            "pix_fmt=rgba".to_string(),
+        ];
+
+        let mut cmd = Self::create_stock_melt_command(&args);
+        if let Some(dir) = root_dir {
+            cmd.current_dir(dir);
+        }
+
+        log_msg("FALLBACK", &format!("Invoking upstream passthrough renderer for producer '{}' at frame {}", producer_id, frame));
+        let output = cmd.output().ok();
+        let _ = std::fs::remove_file(&tmp_xml_path);
+
+        let out = output?;
+        let expected_size = (profile.width as usize) * (profile.height as usize) * 4;
+        if out.stdout.len() >= expected_size {
+            let frame_bytes = out.stdout[..expected_size].to_vec();
+            image::RgbaImage::from_raw(profile.width, profile.height, frame_bytes)
+        } else {
+            log_msg("FALLBACK", &format!(
+                "Upstream melt pipe returned {} bytes for frame {}, expected {}",
+                out.stdout.len(), frame, expected_size
+            ));
+            None
+        }
+    }
+
 }
 

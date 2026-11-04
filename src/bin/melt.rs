@@ -186,6 +186,17 @@ fn main() {
         std::process::exit(0);
     }
 
+    // Check if project has unsupported tractor-level features
+    if let Some(proj) = project.as_ref() {
+        if let Some(reason) = proj.check_unsupported_tractor_features() {
+            log_msg("MELT", &format!("Detected unsupported tractor feature: {}. Delegating rendering to upstream MLT engine...", reason));
+            let code = UpstreamMlt::delegate_to_stock_melt(&args[1..]).unwrap_or(1);
+            log_msg("MELT", &format!("Upstream melt returned code: {}", code));
+            log_msg("MELT", "=== INVOCATION END ===");
+            std::process::exit(code);
+        }
+    }
+
     // Determine target output file
     let target_file = cli_target.or_else(|| project.as_ref().and_then(|p| p.get_consumer_target()));
 

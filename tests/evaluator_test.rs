@@ -349,3 +349,87 @@ fn test_luma_wipe_transition() {
     fb_1.apply_luma_wipe(&luma, 10, 10, 1.0, 0.05, false);
     assert_eq!(fb_1.data[(5 * 10 + 0) * 4 + 3], 255);
 }
+
+#[test]
+fn test_unsupported_filter_and_producer_passthrough_detection() {
+    let xml = r#"
+    <mlt>
+      <profile width="100" height="100" frame_rate_num="25" frame_rate_den="1" display_aspect_num="1" display_aspect_den="1" />
+      <producer id="p_supported">
+        <property name="mlt_service">colour</property>
+        <property name="colour">0xff0000ff</property>
+        <filter id="f_blur">
+          <property name="mlt_service">avfilter.gblur</property>
+          <property name="sigma">5.0</property>
+        </filter>
+      </producer>
+      <producer id="p_unsupported_filter">
+        <property name="mlt_service">colour</property>
+        <property name="colour">0x00ff00ff</property>
+        <filter id="f_glow">
+          <property name="mlt_service">frei0r.glow</property>
+        </filter>
+      </producer>
+      <producer id="p_title">
+        <property name="mlt_service">kdenlivetitle</property>
+      </producer>
+      <playlist id="pl_supported">
+        <entry producer="p_supported" in="0" out="10" />
+      </playlist>
+      <playlist id="pl_unsupported">
+        <entry producer="p_unsupported_filter" in="0" out="10" />
+      </playlist>
+      <tractor id="root_ok">
+        <track producer="pl_supported" />
+        <transition id="tr_wipe" in="0" out="10">
+          <property name="kdenlive_id">wipe</property>
+          <property name="mlt_service">luma</property>
+          <property name="a_track">0</property>
+          <property name="b_track">1</property>
+        </transition>
+      </tractor>
+    </mlt>
+    "#;
+
+    let proj = mlt_7::parser::MltProject::parse_xml(xml).expect("XML should parse cleanly");
+
+    let p_supp = proj.producers.get("p_supported").unwrap();
+    println!("p_supp: {:?}", p_supp);
+    assert!(!p_supp.needs_passthrough(None));
+
+    let p_unsupp = proj.producers.get("p_unsupported_filter").unwrap();
+    assert!(p_unsupp.needs_passthrough(None));
+
+    let p_title = proj.producers.get("p_title").unwrap();
+    assert!(p_title.needs_passthrough(None));
+
+    assert!(proj.check_unsupported_tractor_features().is_none());
+}
+
+#[test]
+fn test_unsupported_tractor_features_detection() {
+    let xml = r#"
+    <mlt>
+      <profile width="100" height="100" frame_rate_num="25" frame_rate_den="1" display_aspect_num="1" display_aspect_den="1" />
+      <producer id="p1">
+        <property name="mlt_service">colour</property>
+      </producer>
+      <playlist id="pl1">
+        <entry producer="p1" in="0" out="10" />
+      </playlist>
+      <tractor id="root_bad">
+        <track producer="pl1" />
+        <transition id="tr_unsupported" in="0" out="5">
+          <property name="mlt_service">frei0r.sleid0r_slide-left</property>
+          <property name="a_track">0</property>
+          <property name="b_track">1</property>
+        </transition>
+      </tractor>
+    </mlt>
+    "#;
+
+    let proj = mlt_7::parser::MltProject::parse_xml(xml).expect("XML should parse cleanly");
+    let check = proj.check_unsupported_tractor_features();
+    assert!(check.is_some());
+    assert!(check.unwrap().contains("frei0r.sleid0r_slide-left"));
+}

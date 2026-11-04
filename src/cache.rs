@@ -8,6 +8,7 @@ pub struct TextureCache {
     cache: HashMap<PathBuf, RgbaImage>,
     processed_cache: HashMap<(PathBuf, Option<[u8; 4]>, u32, bool), RgbaImage>,
     luma_cache: HashMap<PathBuf, (u32, u32, Vec<u8>)>,
+    passthrough_cache: HashMap<(String, u64), RgbaImage>,
 }
 
 impl TextureCache {
@@ -16,6 +17,7 @@ impl TextureCache {
             cache: HashMap::new(),
             processed_cache: HashMap::new(),
             luma_cache: HashMap::new(),
+            passthrough_cache: HashMap::new(),
         }
     }
 
@@ -131,6 +133,37 @@ impl TextureCache {
             }
         }
         self.luma_cache.get(&p)
+    }
+
+    pub fn get_or_render_passthrough(
+        &mut self,
+        profile: &crate::parser::Profile,
+        producer: &crate::parser::Producer,
+        extra_filters: &[crate::parser::Filter],
+        clip_frame: u64,
+        root_dir: Option<&Path>,
+    ) -> Option<&RgbaImage> {
+        let is_static = producer.is_static() && extra_filters.is_empty();
+        let cache_frame = if is_static { 0 } else { clip_frame };
+        let cache_key = (producer.id.clone(), cache_frame);
+
+        if !self.passthrough_cache.contains_key(&cache_key) {
+            let extra_filters_xml: Vec<String> = extra_filters.iter().map(|f| f.raw_xml.clone()).collect();
+            if let Some(rendered) = crate::fallback::UpstreamMlt::render_producer_frame(
+                profile,
+                &producer.raw_xml,
+                &extra_filters_xml,
+                &producer.id,
+                clip_frame,
+                root_dir,
+            ) {
+                log_msg("CACHE", &format!("Cached passthrough frame for producer '{}' (frame {}, is_static={})", producer.id, cache_frame, is_static));
+                self.passthrough_cache.insert(cache_key.clone(), rendered);
+            } else {
+                return None;
+            }
+        }
+        self.passthrough_cache.get(&cache_key)
     }
 }
 

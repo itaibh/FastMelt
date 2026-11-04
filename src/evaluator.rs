@@ -55,10 +55,18 @@ impl<'a> TimelineEvaluator<'a> {
                 }
             }
 
-            // Only intercept track rendering if an actual transition (like a luma wipe) is active.
+            // Only intercept track rendering if an actual transition (like a luma wipe or mix/dissolve) is active.
             // Internal mixing transitions (always_active=1 without luma/keyframes) are blended directly.
             let active_wipe = tractor.transitions.iter().find(|tr| {
-                (tr.luma.is_some() || tr.kdenlive_id == "wipe")
+                (tr.luma.is_some() || tr.kdenlive_id == "wipe" || tr.mlt_service == "luma")
+                    && tr.b_track == track_idx
+                    && tr.out_frame > tr.in_frame
+                    && frame >= tr.in_frame
+                    && frame <= tr.out_frame
+            });
+
+            let active_mix = tractor.transitions.iter().find(|tr| {
+                (tr.kdenlive_id == "mix" || tr.kdenlive_id == "dissolve" || tr.mlt_service == "mix")
                     && tr.b_track == track_idx
                     && tr.out_frame > tr.in_frame
                     && frame >= tr.in_frame
@@ -84,6 +92,13 @@ impl<'a> TimelineEvaluator<'a> {
                     }
                 }
                 fb.blend_framebuffer(&track_fb, 1.0);
+            } else if let Some(tr) = active_mix {
+                let mut track_fb = FrameBuffer::new(fb.width, fb.height);
+                self.render_track_content(&track.producer_id, frame, &mut track_fb, depth);
+                let rel_frame = frame.saturating_sub(tr.in_frame);
+                let total = (tr.out_frame.saturating_sub(tr.in_frame)).max(1) as f32;
+                let progress = (rel_frame as f32 / total).clamp(0.0, 1.0);
+                fb.blend_framebuffer(&track_fb, progress);
             } else {
                 self.render_track_content(&track.producer_id, frame, fb, depth);
             }
@@ -174,6 +189,71 @@ impl<'a> TimelineEvaluator<'a> {
         fb: &mut FrameBuffer,
         depth: u32,
     ) {
+        if producer.needs_passthrough(extra_filters) {
+            crate::logger::log_msg("EVALUATOR", &format!(
+                "Producer '{}' requires upstream MLT passthrough at frame {}",
+                producer.id, clip_frame
+            ));
+
+            let rendered_opt = self.cache.get_or_render_passthrough(
+                &self.project.profile,
+                producer,
+                extra_filters.unwrap_or(&[]),
+                clip_frame,
+                self.project.root_dir.as_deref(),
+            );
+
+            if let Some(img) = rendered_opt.cloned() {
+                let src_w = img.width();
+                let src_h = img.height();
+
+                let mut composite_matrix = FrameBuffer::build_affine_matrix(
+                    src_w as f32,
+                    src_h as f32,
+                    0.0,
+                    0.0,
+                    fb.width as f32,
+                    fb.height as f32,
+                    0.0,
+                    false,
+                    false,
+                );
+                let mut total_opacity = 1.0f32;
+
+                if let Some(extras) = extra_filters {
+                    for f in extras {
+                        if let FilterType::QtBlend { rect_keyframes, rotation_keyframes, rotate_center, distort } = &f.filter_type {
+                            let (rx, ry, rw, rh, op) = KeyframeRect::interpolate(rect_keyframes, clip_frame);
+                            let rot = MltProject::interpolate_float(rotation_keyframes, clip_frame);
+                            total_opacity *= op;
+                            let m = FrameBuffer::build_affine_matrix(
+                                src_w as f32,
+                                src_h as f32,
+                                rx,
+                                ry,
+                                rw,
+                                rh,
+                                rot,
+                                *rotate_center,
+                                *distort,
+                            );
+                            composite_matrix = m;
+                            break;
+                        }
+                    }
+                }
+
+                fb.blend_affine_matrix(
+                    img.as_raw(),
+                    src_w,
+                    src_h,
+                    composite_matrix,
+                    total_opacity,
+                );
+                return;
+            }
+        }
+
         match &producer.source {
             ProducerSource::Image(rel_or_abs_path) => {
                 let resolved_path = self.resolve_path(rel_or_abs_path);
@@ -546,8 +626,8 @@ impl<'a> TimelineEvaluator<'a> {
                     }
                 }
             }
-            ProducerSource::Video(_) => {
-                // Video decoder pass if present
+            ProducerSource::Video(_) | ProducerSource::Passthrough { .. } => {
+                // Handled above via needs_passthrough
             }
         }
     }
