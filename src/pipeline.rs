@@ -424,10 +424,10 @@ impl FrameBuffer {
             return;
         }
 
-        let radius_int = radius.round() as i32;
+        let radius_int = (radius * 2.5).ceil().max(1.0) as i32;
         let kernel_size = (radius_int * 2 + 1) as usize;
         let mut kernel = vec![0.0f32; kernel_size];
-        let sigma = radius / 2.0;
+        let sigma = radius;
         let two_sigma_sq = 2.0 * sigma * sigma;
         let mut sum = 0.0;
 
@@ -548,7 +548,7 @@ impl FrameBuffer {
             }
             self.blend_raw(&sil, source.width(), source.height(), dst_x, dst_y, dst_w, dst_h, eff_opacity);
         } else {
-            let pad = (radius * 1.5).ceil() as u32;
+            let pad = (radius * 2.5).ceil() as u32;
             let pad_i32 = pad as i32;
             let sh_w = dst_w + pad * 2;
             let sh_h = dst_h + pad * 2;
@@ -562,11 +562,28 @@ impl FrameBuffer {
             let sil_stride = (sh_w as usize) * 4;
 
             for sy in 0..dst_h {
-                let src_y = (((sy as f32) * scale_y) as usize).min(src_h as usize - 1);
                 let sil_y = (sy + pad) as usize;
+                let gy = (sy as f32 + 0.5) * scale_y - 0.5;
+                let y0 = (gy.floor() as usize).clamp(0, src_h as usize - 1);
+                let y1 = (y0 + 1).min(src_h as usize - 1);
+                let fy = (gy - gy.floor()).clamp(0.0, 1.0);
+
                 for sx in 0..dst_w {
-                    let src_x = (((sx as f32) * scale_x) as usize).min(src_w as usize - 1);
-                    let a = src_raw[(src_y * (src_w as usize) + src_x) * 4 + 3];
+                    let gx = (sx as f32 + 0.5) * scale_x - 0.5;
+                    let x0 = (gx.floor() as usize).clamp(0, src_w as usize - 1);
+                    let x1 = (x0 + 1).min(src_w as usize - 1);
+                    let fx = (gx - gx.floor()).clamp(0.0, 1.0);
+
+                    let a00 = src_raw[(y0 * (src_w as usize) + x0) * 4 + 3] as f32;
+                    let a10 = src_raw[(y0 * (src_w as usize) + x1) * 4 + 3] as f32;
+                    let a01 = src_raw[(y1 * (src_w as usize) + x0) * 4 + 3] as f32;
+                    let a11 = src_raw[(y1 * (src_w as usize) + x1) * 4 + 3] as f32;
+
+                    let a = ((1.0 - fx) * (1.0 - fy) * a00
+                        + fx * (1.0 - fy) * a10
+                        + (1.0 - fx) * fy * a01
+                        + fx * fy * a11).round() as u8;
+
                     if a > 0 {
                         let sil_idx = sil_y * sil_stride + ((sx + pad) as usize) * 4;
                         sil[sil_idx] = cr;

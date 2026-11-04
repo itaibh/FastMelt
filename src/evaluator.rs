@@ -190,6 +190,9 @@ impl<'a> TimelineEvaluator<'a> {
                     let canvas_h = fb.height as f32;
 
                     // 1. Resolve Producer-level transform
+                    // If the producer has a qtblend filter (like mouth shapes at 0 0 452 598 or character cutouts),
+                    // apply it to place the source image into canvas coordinates.
+                    // If none, default to fitting source image into canvas coordinates maintaining aspect ratio.
                     let mut prod_matrix = None;
                     let mut prod_opacity = 1.0f32;
 
@@ -199,30 +202,37 @@ impl<'a> TimelineEvaluator<'a> {
                             let rot = MltProject::interpolate_float(rotation_keyframes, clip_frame);
                             prod_opacity = op;
 
-                            let is_ident = rot.abs() <= 0.001
-                                && rx.abs() <= 0.001
-                                && ry.abs() <= 0.001
-                                && (rw - src_w as f32).abs() <= 1.0
-                                && (rh - src_h as f32).abs() <= 1.0;
-
-                            if !is_ident {
-                                prod_matrix = Some(FrameBuffer::build_affine_matrix(
-                                    src_w as f32,
-                                    src_h as f32,
-                                    rx,
-                                    ry,
-                                    rw,
-                                    rh,
-                                    rot,
-                                    *rotate_center,
-                                    *distort,
-                                ));
-                                break;
-                            }
+                            prod_matrix = Some(FrameBuffer::build_affine_matrix(
+                                src_w as f32,
+                                src_h as f32,
+                                rx,
+                                ry,
+                                rw,
+                                rh,
+                                rot,
+                                *rotate_center,
+                                *distort,
+                            ));
+                            break;
                         }
                     }
 
+                    let m1 = prod_matrix.unwrap_or_else(|| {
+                        FrameBuffer::build_affine_matrix(
+                            src_w as f32,
+                            src_h as f32,
+                            0.0,
+                            0.0,
+                            canvas_w,
+                            canvas_h,
+                            0.0,
+                            false,
+                            false,
+                        )
+                    });
+
                     // 2. Resolve Playlist entry-level transform
+                    // Timeline entry transforms operate in canvas coordinate space (1080x1920)
                     let mut entry_matrix = None;
                     let mut entry_opacity = 1.0f32;
 
@@ -252,20 +262,12 @@ impl<'a> TimelineEvaluator<'a> {
                     }
 
                     // 3. Compose final affine matrix
-                    let (composite_matrix, total_opacity) = match (prod_matrix, entry_matrix) {
-                        (Some(m1), Some((rx2, ry2, rw2, rh2, rot2, rc2, _dist2))) => {
-                            let m2 = FrameBuffer::build_affine_matrix(canvas_w, canvas_h, rx2, ry2, rw2, rh2, rot2, rc2, true);
+                    let (composite_matrix, total_opacity) = match entry_matrix {
+                        Some((rx2, ry2, rw2, rh2, rot2, rc2, dist2)) => {
+                            let m2 = FrameBuffer::build_affine_matrix(canvas_w, canvas_h, rx2, ry2, rw2, rh2, rot2, rc2, dist2);
                             (m2 * m1, prod_opacity * entry_opacity)
                         }
-                        (Some(m1), None) => (m1, prod_opacity * entry_opacity),
-                        (None, Some((rx2, ry2, rw2, rh2, rot2, rc2, dist2))) => {
-                            let m2 = FrameBuffer::build_affine_matrix(src_w as f32, src_h as f32, rx2, ry2, rw2, rh2, rot2, rc2, dist2);
-                            (m2, entry_opacity)
-                        }
-                        (None, None) => {
-                            let m = FrameBuffer::build_affine_matrix(src_w as f32, src_h as f32, 0.0, 0.0, canvas_w, canvas_h, 0.0, false, false);
-                            (m, 1.0)
-                        }
+                        None => (m1, prod_opacity * entry_opacity),
                     };
 
                     // 4. Render drop shadow if present
