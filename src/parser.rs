@@ -721,14 +721,26 @@ impl MltProject {
             }
         }
         if keyframes.is_empty() {
-            keyframes.push(KeyframeRect {
-                frame: 0,
-                x: 0.0,
-                y: 0.0,
-                w: 1080.0,
-                h: 1920.0,
-                opacity: 1.0,
-            });
+            let nums: Vec<f32> = rect_str.split_whitespace().filter_map(|s| s.parse().ok()).collect();
+            if nums.len() >= 4 {
+                keyframes.push(KeyframeRect {
+                    frame: 0,
+                    x: nums[0],
+                    y: nums[1],
+                    w: nums[2],
+                    h: nums[3],
+                    opacity: if nums.len() >= 5 { nums[4] } else { 1.0 },
+                });
+            } else {
+                keyframes.push(KeyframeRect {
+                    frame: 0,
+                    x: 0.0,
+                    y: 0.0,
+                    w: 1080.0,
+                    h: 1920.0,
+                    opacity: 1.0,
+                });
+            }
         }
         keyframes.sort_by_key(|k| k.frame);
         keyframes

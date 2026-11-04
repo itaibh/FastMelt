@@ -139,8 +139,8 @@ impl FrameBuffer {
             });
     }
 
-    /// Build 2D Affine Matrix for qtblend geometry
-    pub fn build_affine_matrix(
+    /// Build 2D Affine Matrix for qtblend geometry with optional DAR override
+    pub fn build_affine_matrix_with_dar(
         src_w: f32,
         src_h: f32,
         rect_x: f32,
@@ -150,6 +150,7 @@ impl FrameBuffer {
         rotation_deg: f32,
         rotate_center: bool,
         distort: bool,
+        dar_opt: Option<f32>,
     ) -> Affine2 {
         let mut m = Affine2::from_translation(vec2(rect_x, rect_y));
         let rad = rotation_deg.to_radians();
@@ -164,9 +165,9 @@ impl FrameBuffer {
         if distort {
             m = m * Affine2::from_scale(vec2(rect_w / src_w, rect_h / src_h));
         } else {
-            let src_aspect = src_w / src_h;
+            let dar = dar_opt.unwrap_or_else(|| src_w / src_h);
             let target_aspect = rect_w / rect_h;
-            let scale = if src_aspect >= target_aspect {
+            let scale = if dar >= target_aspect {
                 rect_w / src_w
             } else {
                 rect_h / src_h
@@ -177,6 +178,32 @@ impl FrameBuffer {
             m = m * Affine2::from_scale(vec2(scale, scale));
         }
         m
+    }
+
+    /// Build 2D Affine Matrix for qtblend geometry
+    pub fn build_affine_matrix(
+        src_w: f32,
+        src_h: f32,
+        rect_x: f32,
+        rect_y: f32,
+        rect_w: f32,
+        rect_h: f32,
+        rotation_deg: f32,
+        rotate_center: bool,
+        distort: bool,
+    ) -> Affine2 {
+        Self::build_affine_matrix_with_dar(
+            src_w,
+            src_h,
+            rect_x,
+            rect_y,
+            rect_w,
+            rect_h,
+            rotation_deg,
+            rotate_center,
+            distort,
+            None,
+        )
     }
 
     /// Full 2D Affine Transformation Blitter using precomputed Affine2 matrix

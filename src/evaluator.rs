@@ -264,11 +264,25 @@ impl<'a> TimelineEvaluator<'a> {
                     // 3. Compose final affine matrix
                     let (composite_matrix, total_opacity) = match entry_matrix {
                         Some((rx2, ry2, rw2, rh2, rot2, rc2, dist2)) => {
-                            let m2 = FrameBuffer::build_affine_matrix(canvas_w, canvas_h, rx2, ry2, rw2, rh2, rot2, rc2, dist2);
+                            let prod_dar = src_w as f32 / src_h as f32;
+                            let m2 = FrameBuffer::build_affine_matrix_with_dar(
+                                canvas_w,
+                                canvas_h,
+                                rx2,
+                                ry2,
+                                rw2,
+                                rh2,
+                                rot2,
+                                rc2,
+                                dist2,
+                                Some(prod_dar),
+                            );
                             (m2 * m1, prod_opacity * entry_opacity)
                         }
                         None => (m1, prod_opacity * entry_opacity),
                     };
+
+                    crate::logger::log_msg("COMPOSITE", &format!("producer: {} ({}x{}) m1: {:?} entry: {:?} comp: {:?}", producer.id, src_w, src_h, m1, entry_matrix, composite_matrix));
 
                     // 4. Render drop shadow if present
                     if let Some((radius, x_off, y_off, color)) = drop_shadow {
