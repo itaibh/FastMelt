@@ -8,7 +8,7 @@ pub struct UpstreamMlt {
 }
 
 pub struct UpstreamClipRenderer {
-    profile: *mut c_void,
+    _profile: *mut c_void,
     producer: *mut c_void,
     consumer: *mut c_void,
 }
@@ -110,7 +110,7 @@ impl UpstreamClipRenderer {
 
             consumer_connect(consumer, producer);
             Some(Self {
-                profile,
+                _profile: profile,
                 producer,
                 consumer,
             })
@@ -209,7 +209,7 @@ impl UpstreamClipRenderer {
 
             consumer_connect(consumer, producer);
             Some(Self {
-                profile,
+                _profile: profile,
                 producer,
                 consumer,
             })

@@ -1201,7 +1201,7 @@ void fastmelt_init_dispatch(void) {
     real_mlt_version_get_revision = dlsym(stock_mlt_handle, "mlt_version_get_revision");
     real_mlt_version_get_string = dlsym(stock_mlt_handle, "mlt_version_get_string");
     real_mlt_vlog = dlsym(stock_mlt_handle, "mlt_vlog");
-    FILE *logf = fopen("/home/itaibh/Projects/OliveMltBridge/fastmelt.log", "a");
+    FILE *logf = fopen("fastmelt.log", "a");
     if (!logf) logf = fopen("/tmp/fastmelt.log", "a");
     if (logf) {
         fprintf(logf, "[SHIM] [PID:%d] FastMelt libmlt.so loaded successfully\n", getpid());

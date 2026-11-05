@@ -165,7 +165,7 @@ def main():
         f.write("    /* Resolve all symbols */\n")
         for name, _ in symbols:
             f.write(f'    real_{name} = dlsym(stock_mlt_handle, "{name}");\n')
-        f.write('    FILE *logf = fopen("/home/itaibh/Projects/OliveMltBridge/fastmelt.log", "a");\n')
+        f.write('    FILE *logf = fopen("fastmelt.log", "a");\n')
         f.write('    if (!logf) logf = fopen("/tmp/fastmelt.log", "a");\n')
         f.write("    if (logf) {\n")
         f.write('        fprintf(logf, "[SHIM] [PID:%d] FastMelt libmlt.so loaded successfully\\n", getpid());\n')

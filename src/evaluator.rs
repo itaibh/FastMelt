@@ -789,7 +789,7 @@ impl<'a> TimelineEvaluator<'a> {
                 return candidate;
             }
         }
-        // Fallback: check if filename exists in root or library or common folders
+        // Fallback: check if filename exists in root or standard subfolders (graphics, library)
         if let Some(fname) = p.file_name() {
             if let Some(ref root) = self.project.root_dir {
                 let candidate = root.join(fname);
@@ -800,23 +800,14 @@ impl<'a> TimelineEvaluator<'a> {
                 if graphics.exists() {
                     return graphics;
                 }
-            }
-            if let Ok(home) = std::env::var("HOME") {
-                let base = std::path::Path::new(&home).join("Videos/rogue unfiltered");
-                let c1 = base.join(fname);
-                if c1.exists() { return c1; }
-                let c2 = base.join("graphics").join(fname);
-                if c2.exists() { return c2; }
-                let c3 = base.join("library/graphics").join(fname);
-                if c3.exists() { return c3; }
-                let c4 = base.join("e01").join(fname);
-                if c4.exists() { return c4; }
-                let c4_2 = base.join("e02").join(fname);
-                if c4_2.exists() { return c4_2; }
-                let c4_3 = base.join("e03").join(fname);
-                if c4_3.exists() { return c4_3; }
-                let c5 = base.join("library").join(fname);
-                if c5.exists() { return c5; }
+                let library = root.join("library").join(fname);
+                if library.exists() {
+                    return library;
+                }
+                let lib_graphics = root.join("library").join("graphics").join(fname);
+                if lib_graphics.exists() {
+                    return lib_graphics;
+                }
             }
         }
         p.to_path_buf()

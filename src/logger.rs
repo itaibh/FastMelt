@@ -15,10 +15,8 @@ pub fn get_log_paths() -> Vec<PathBuf> {
         paths.push(PathBuf::from(custom));
     }
 
-    // 2. Project root log file
-    let repo_log = PathBuf::from("/home/itaibh/Projects/OliveMltBridge/fastmelt.log");
-    paths.push(repo_log);
-    paths.push(PathBuf::from("/home/itaibh/Projects/OliveMltBridge/olive_mlt.log"));
+    // 2. Local working directory log file
+    paths.push(PathBuf::from("fastmelt.log"));
 
     // 3. User home cache
     if let Ok(home) = std::env::var("HOME") {
