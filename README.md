@@ -1,6 +1,6 @@
 # FastMelt
 
-A high-performance GPU-accelerated drop-in replacement for MLT (`melt` and `libmlt.so`) in Kdenlive.
+A high-performance GPU-accelerated drop-in replacement for [MLT](https://github.com/mltframework/mlt) (`melt` and `libmlt.so`) in Kdenlive.
 
 ## The Problem It Solves
 Kdenlive delegates all rendering and timeline evaluation to the MLT framework. MLT processes compositing, transitions, scaling, and convolution filters (like 20px Gaussian blurs and drop shadows) on the CPU using single-threaded raster algorithms (`qtblend`, `QPainter`). 
