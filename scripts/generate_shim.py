@@ -83,11 +83,12 @@ VERSION_CHAIN = [
 ]
 
 # Symbols explicitly implemented/intercepted in Rust
-# (Do NOT generate assembly trampolines for these)
-OVERRIDDEN_SYMBOLS = {
+# Trampolines for these will jump to rust_<name> instead of *real_<name>(%rip)
+INTERCEPTED_SYMBOLS = {
     "mlt_factory_init",
     "mlt_factory_close",
     "mlt_profile_init",
+    "mlt_consumer_start",
 }
 
 def main():
@@ -180,12 +181,13 @@ def main():
         f.write("/* Auto-generated x86_64 assembly trampolines for FastMelt */\n")
         f.write(".text\n\n")
         for name, _ in symbols:
-            if name in OVERRIDDEN_SYMBOLS:
-                continue
             f.write(f".global {name}\n")
             f.write(f".type {name}, @function\n")
             f.write(f"{name}:\n")
-            f.write(f"    jmp *real_{name}(%rip)\n")
+            if name in INTERCEPTED_SYMBOLS:
+                f.write(f"    jmp rust_{name}\n")
+            else:
+                f.write(f"    jmp *real_{name}(%rip)\n")
             f.write(f".size {name}, . - {name}\n\n")
     print(f"[✓] Generated {trampolines_s}")
     
@@ -197,6 +199,7 @@ def main():
         f.write('extern "C" {\n')
         for name, _ in symbols:
             f.write(f"    pub static real_{name}: *mut c_void;\n")
+        f.write("    pub fn fastmelt_init_dispatch();\n")
         f.write("}\n")
     print(f"[✓] Generated {mod_rs}")
 

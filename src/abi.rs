@@ -11,7 +11,7 @@ pub type MltRepository = *mut c_void;
 pub type MltConsumer = *mut c_void;
 
 #[no_mangle]
-pub extern "C" fn mlt_factory_init(directory: *const c_char) -> MltRepository {
+pub extern "C" fn rust_mlt_factory_init(directory: *const c_char) -> MltRepository {
     log_msg("ABI", "mlt_factory_init intercepted by FastMelt proxy");
     unsafe {
         if !real_mlt_factory_init.is_null() {
@@ -28,7 +28,7 @@ pub extern "C" fn mlt_factory_init(directory: *const c_char) -> MltRepository {
 }
 
 #[no_mangle]
-pub extern "C" fn mlt_factory_close() {
+pub extern "C" fn rust_mlt_factory_close() {
     log_msg("ABI", "mlt_factory_close intercepted by FastMelt proxy");
     unsafe {
         if !real_mlt_factory_close.is_null() {
@@ -39,7 +39,7 @@ pub extern "C" fn mlt_factory_close() {
 }
 
 #[no_mangle]
-pub extern "C" fn mlt_profile_init(name: *const c_char) -> MltProfile {
+pub extern "C" fn rust_mlt_profile_init(name: *const c_char) -> MltProfile {
     unsafe {
         crate::shim::fastmelt_init_dispatch();
     }
@@ -62,7 +62,7 @@ pub extern "C" fn mlt_profile_init(name: *const c_char) -> MltProfile {
 }
 
 #[no_mangle]
-pub extern "C" fn mlt_consumer_start(consumer: MltConsumer) -> c_int {
+pub extern "C" fn rust_mlt_consumer_start(consumer: MltConsumer) -> c_int {
     log_msg("ABI", "mlt_consumer_start intercepted by FastMelt libmlt proxy");
     unsafe {
         if real_mlt_consumer_start.is_null() {

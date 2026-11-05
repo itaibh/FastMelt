@@ -499,13 +499,11 @@ mlt_consumer_service:
     jmp *real_mlt_consumer_service(%rip)
 .size mlt_consumer_service, . - mlt_consumer_service
 
-/*
 .global mlt_consumer_start
 .type mlt_consumer_start, @function
 mlt_consumer_start:
-    jmp *real_mlt_consumer_start(%rip)
+    jmp rust_mlt_consumer_start
 .size mlt_consumer_start, . - mlt_consumer_start
-*/
 
 .global mlt_consumer_stop
 .type mlt_consumer_stop, @function
@@ -819,6 +817,12 @@ mlt_events_wait_for:
     jmp *real_mlt_events_wait_for(%rip)
 .size mlt_events_wait_for, . - mlt_events_wait_for
 
+.global mlt_factory_close
+.type mlt_factory_close, @function
+mlt_factory_close:
+    jmp rust_mlt_factory_close
+.size mlt_factory_close, . - mlt_factory_close
+
 .global mlt_factory_consumer
 .type mlt_factory_consumer, @function
 mlt_factory_consumer:
@@ -842,6 +846,12 @@ mlt_factory_event_object:
 mlt_factory_filter:
     jmp *real_mlt_factory_filter(%rip)
 .size mlt_factory_filter, . - mlt_factory_filter
+
+.global mlt_factory_init
+.type mlt_factory_init, @function
+mlt_factory_init:
+    jmp rust_mlt_factory_init
+.size mlt_factory_init, . - mlt_factory_init
 
 .global mlt_factory_link
 .type mlt_factory_link, @function
@@ -2186,6 +2196,12 @@ mlt_profile_fps:
 mlt_profile_from_producer:
     jmp *real_mlt_profile_from_producer(%rip)
 .size mlt_profile_from_producer, . - mlt_profile_from_producer
+
+.global mlt_profile_init
+.type mlt_profile_init, @function
+mlt_profile_init:
+    jmp rust_mlt_profile_init
+.size mlt_profile_init, . - mlt_profile_init
 
 .global mlt_profile_is_valid
 .type mlt_profile_is_valid, @function
