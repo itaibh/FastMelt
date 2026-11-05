@@ -47,14 +47,16 @@ On complex multi-track vertical HD timelines (e.g., animated lip-sync projects w
 | MLT Service | FastMelt Handling | Acceleration Method |
 | :--- | :--- | :--- |
 | `qimage` | PNG / JPG image layers | Uploaded to GPU texture cache once |
+| `qimage-sequence` | Numbered PNG/JPG image sequences (`%05d`) | Dynamic per-frame sequence loader in texture cache |
+| `avformat` (Producer) | Video clip playback / layers | Frame extraction via FFmpeg pipe into texture cache |
 | `qtblend` | Timeline transforms / transitions | GPU affine transform vertex/fragment shader |
 | `dropshadow` | Drop shadow with radius & offset | 2-pass separable GPU Gaussian blur shader |
 | `avfilter.gblur` | Gaussian blur | Fast GPU separable convolution shader |
 | `wave` | Sinusoidal wave deformation | Real-time coordinate displacement |
 | `wipe` / `luma` | Grayscale wipe transitions | Luma threshold shader |
 | `mix` | Audio track mixing | Concurrent background MLT pass + FFmpeg mux |
-| `avformat` | Consumer export | Direct VA-API H.264/HEVC hardware encoder |
-| *Other* | Any unsupported filter | Dynamically proxied to upstream `libmlt-7.so` |
+| `avformat` (Consumer) | Video export | Direct VA-API H.264/HEVC hardware encoder |
+| *Other* | Unsupported filters / producers | Dynamically rendered via upstream `libmlt-7.so` clip renderer |
 
 ---
 
@@ -63,17 +65,35 @@ On complex multi-track vertical HD timelines (e.g., animated lip-sync projects w
 ```text
 FastMelt/
 ├── Cargo.toml          # Rust configuration (produces 'melt' bin and 'mlt-7' cdylib)
-├── README.md           # This documentation
+├── build.rs            # Build script compiling C-ABI dispatch & trampolines
+├── mlt.version         # Symbol version script for MLT C-ABI compatibility
+├── switch.sh           # Flatpak switcher CLI & interactive menu
+├── README.md           # Project documentation
+├── REQUIREMENTS.md     # Requirements specification & implementation status
+├── ARCHITECTURE_MAPPING.md # Architecture & method mapping documentation
+├── scripts/            # Helper scripts for Flatpak integration & shim generation
+│   ├── common.sh
+│   ├── status.sh
+│   ├── switch-to-project.sh
+│   ├── switch-to-original.sh
+│   └── generate_shim.py
 └── src/
-    ├── lib.rs          # Library root & proxy fallback
+    ├── lib.rs          # Library root & exports
     ├── bin/
     │   └── melt.rs     # CLI drop-in replacing /app/bin/melt
     ├── parser.rs       # XML parser for .mlt project files
-    ├── evaluator.rs    # Timeline composition & keyframe evaluator
+    ├── evaluator.rs    # Timeline composition, keyframe evaluation, clip fallback
     ├── pipeline.rs     # GPU/parallel compositor (qtblend, dropshadow, blur)
+    ├── cache.rs        # Texture, image sequence, and video frame cache
+    ├── encoder.rs      # Hardware VA-API FFmpeg encoder pipe
     ├── audio.rs        # Concurrent audio rendering pass and muxer
-    ├── fallback.rs     # Upstream libmlt-7.so dynamic loader (dlopen proxy)
-    └── abi.rs          # C-ABI export symbols for libmlt-7.so compatibility
+    ├── fallback.rs     # Upstream libmlt-7.so dynamic loader & clip renderer
+    ├── abi.rs          # C-ABI export symbols for libmlt-7.so compatibility
+    ├── logger.rs       # Unified logging subsystem
+    └── shim/
+        ├── mod.rs      # Shim FFI definitions
+        ├── mlt_dispatch.c   # Dynamic loader resolving 581 upstream symbols
+        └── mlt_trampolines.s # Assembly trampolines forwarding unintercepted calls
 ```
 
 ---

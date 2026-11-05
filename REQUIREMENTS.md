@@ -192,7 +192,7 @@ Accelerate render speeds from **~7 fps** to **45–60+ fps** by moving layer tra
   - Implemented `mux_video_audio` using FFmpeg stream copying (`-c:v copy -c:a aac -b:a 192k -shortest`) with zero video re-encoding.
   - Integrated burned subtitle detection (`get_subtitle_file`) passing `.srt` files directly into FFmpeg filtergraph.
   - Implemented transition evaluation with native `wipe`/`luma` handling and track mixing.
-- **Status**: Verified working with full 1,499-frame timeline render (`e01 - shorter cut - hw.mp4`) with perfectly synchronized audio and burned subtitles.
+- **Status**: Verified working with full 1,499-frame multi-track vertical HD timeline render with perfectly synchronized audio and burned subtitles.
 
 ### Phase 5: C-ABI Dynamic Proxy & Upstream Library Shim [COMPLETED]
 - **Goal**: Build an ABI-compliant `libmlt_7.so` that exports all 581 upstream C functions with GNU symbol versioning (`MLT_0.8.8` through `MLT_7.42.0`), intercepts desired calls in Rust, and delegates all unhandled calls to the stock MLT shared library via zero-overhead assembly trampolines.
@@ -202,21 +202,31 @@ Accelerate render speeds from **~7 fps** to **45–60+ fps** by moving layer tra
   - `src/shim/mlt_dispatch.c`: Shared object constructor (`__attribute__((constructor))`) that dynamically opens the upstream stock library (`/app/lib/libmlt-7.so.7.43.0` or system fallback) and populates function pointers via `dlsym`.
   - `src/shim/mlt_trampolines.s`: Zero-overhead x86_64 assembly jumps (`jmp *real_sym(%rip)`) for all unintercepted functions, preserving all CPU registers, stack alignment, and arguments.
   - `build.rs`: Integrates `.c` and `.s` compilation and links them directly into `libmlt_7.so` with `-Wl,-soname,libmlt-7.so.7`.
-  - `src/abi.rs`: Rust implementations for intercepted functions (`mlt_factory_init`, `mlt_factory_close`).
+  - `src/abi.rs`: Rust implementations for intercepted functions (`mlt_factory_init`, `mlt_factory_close`, `mlt_profile_init`, `mlt_consumer_start`).
 - **Status**: Verified working with integration tests (`tests/abi_shim_test.rs`), `cargo test`, and `flatpak run --command=melt org.kde.kdenlive -version`.
 
-### Phase 6: Timeline Evaluation & Matrix Composition Fixes (v0.1.13) [COMPLETED]
-- **Goal**: Fix missing episode assets (titles, audio) and misaligned mouth/eye overlay transforms in complex timelines (e.g. e02).
+### Phase 6: Timeline Evaluation & Matrix Composition Parity (v0.1.13) [COMPLETED]
+- **Goal**: Fix missing relative assets and misaligned overlay transforms in complex multi-track timelines.
 - **Implementation**:
-  - `src/parser.rs`: Added extraction of `root="..."` attribute from `<mlt>` tag and `<property name="root">` / `<property name="kdenlive:docfolder">`, enabling relative episode assets (`e02_title.png`, local clips) to resolve directly.
+  - `src/parser.rs`: Added extraction of `root="..."` attribute from `<mlt>` tag and `<property name="root">` / `<property name="kdenlive:docfolder">`, enabling relative project assets to resolve directly.
   - `src/bin/melt.rs`: Added automatic `p.root_dir` fallback to the input XML parent directory.
   - `src/evaluator.rs`:
-    - Fixed native-size producer filters: recognized default `0 0 src_w src_h` filters as identity rather than active transforms, preventing double-scaling of facial cutouts, mouth shapes, and titles.
+    - Fixed native-size producer filters: recognized default `0 0 src_w src_h` filters as identity rather than active transforms, preventing double-scaling of facial cutouts, overlays, and titles.
     - Simplified affine matrix composition: maps directly from `(src_w, src_h)` to entry placement rect without compounding canvas DAR twice.
-    - Added episode directories (`e02`, `e03`) to asset search paths in `resolve_path`.
+    - Added project root subdirectories (`graphics`, `library`) to asset search paths in `resolve_path`.
 - **Status**: Verified working with unit tests (`tests/evaluator_test.rs` - 14/14 passing).
 
-### Phase 7: Direct Vulkan/OpenGL Compute Shaders & Extended Blend Modes [FUTURE]
+### Phase 7: Dynamic Upstream Clip-Level Fallback, Sequences & Video Decoders (v0.1.14) [COMPLETED]
+- **Goal**: Support image sequences, arbitrary video clips, and clip-level dynamic fallback to stock MLT for unsupported filters/producers without falling back the whole project.
+- **Implementation**:
+  - `src/parser.rs`: Added image sequence pattern detection (`%0nd`, `#`) and video producer source classification (`ProducerSource::Video`).
+  - `src/cache.rs`: Implemented `get_or_load_sequence_frame` for numbered PNG/JPG sequences and `get_or_load_video_frame` extracting video frames via FFmpeg.
+  - `src/fallback.rs`: Implemented `UpstreamClipRenderer` using dynamically loaded stock MLT to instantiate isolated clip pipelines for unsupported services (e.g., rotoscoping, custom Frei0r filters, complex mattes).
+  - `src/evaluator.rs`: Integrated `UpstreamClipRenderer` into timeline evaluation—unsupported clips are rendered via stock MLT into RGBA buffers and seamlessly composited into FastMelt's GPU timeline.
+  - `src/abi.rs`: Intercepted `mlt_consumer_start` to inspect consumer properties (`target`, connected producers) and coordinate render workflows.
+- **Status**: Verified working with unit tests and end-to-end multi-track timeline renders.
+
+### Phase 8: Direct Vulkan/OpenGL Compute Shaders & Extended Blend Modes [FUTURE]
 - **Goal**: Offload compositing blits directly to Vulkan / OpenGL compute shaders to scale throughput towards 60+ fps.
 - **Implementation**:
   - Transition from SIMD/CPU blitter to Vulkan compute pipelines sharing memory surfaces directly with VA-API/DMA-BUF encoder.
@@ -235,7 +245,7 @@ Accelerate render speeds from **~7 fps** to **45–60+ fps** by moving layer tra
      - 48.0s: Mean channel difference $\le 3.72$ (wave effect)
      - 51.0s: Mean channel difference $\le 2.57$ (wipe transition)
 3. **Performance Benchmark**:
-   - Full 1,499-frame 1080x1920 timeline (`e01 - shorter cut - hw.mp4`):
+   - Full 1,499-frame 1080x1920 timeline:
      - Baseline unoptimized blur: 350.9s (4.3 fps).
      - With cache tiling and optimized pipeline: **207.75s (7.2 fps)** (41% speedup).
 4. **Integration Compatibility**:
