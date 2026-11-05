@@ -149,6 +149,7 @@ Accelerate render speeds from **~7 fps** to **45–60+ fps** by moving layer tra
 | **Consumer / Sink** | Direct VA-API hardware encoder subprocess (`/dev/dri/renderD128`) with piped RGBA framebuffers and burned subtitle integration. | **Complete** |
 | **Audio Subsystem** | Concurrent background audio pass via synthesized audio-only MLT XML, rendering to PCM WAV and zero-loss muxing into final MP4 container. | **Complete** |
 | **Fallback Manager** | Safe CLI delegation to stock `melt-7` with strict recursion prevention. | **Complete** |
+| **ABI Proxy Shim** | Universal drop-in `libmlt_7.so` exporting all 581 MLT functions with exact GNU ld version nodes (`MLT_0.8.8`..`MLT_7.42.0`), dlopen dispatch, and x86_64 assembly trampolines. | **Complete** |
 
 ---
 
@@ -193,7 +194,18 @@ Accelerate render speeds from **~7 fps** to **45–60+ fps** by moving layer tra
   - Implemented transition evaluation with native `wipe`/`luma` handling and track mixing.
 - **Status**: Verified working with full 1,499-frame timeline render (`e01 - shorter cut - hw.mp4`) with perfectly synchronized audio and burned subtitles.
 
-### Phase 5: Direct Vulkan/OpenGL Compute Shaders & Extended Blend Modes [FUTURE]
+### Phase 5: C-ABI Dynamic Proxy & Upstream Library Shim [COMPLETED]
+- **Goal**: Build an ABI-compliant `libmlt_7.so` that exports all 581 upstream C functions with GNU symbol versioning (`MLT_0.8.8` through `MLT_7.42.0`), intercepts desired calls in Rust, and delegates all unhandled calls to the stock MLT shared library via zero-overhead assembly trampolines.
+- **Implementation**:
+  - `scripts/generate_shim.py`: Scans stock `libmlt-7.so.7.43.0` and extracts all 581 functions and their exact symbol version tags.
+  - `mlt.version`: GNU ld version script defining the 31-node MLT version inheritance hierarchy (`MLT_0.8.8`..`MLT_7.42.0`).
+  - `src/shim/mlt_dispatch.c`: Shared object constructor (`__attribute__((constructor))`) that dynamically opens the upstream stock library (`/app/lib/libmlt-7.so.7.43.0` or system fallback) and populates function pointers via `dlsym`.
+  - `src/shim/mlt_trampolines.s`: Zero-overhead x86_64 assembly jumps (`jmp *real_sym(%rip)`) for all unintercepted functions, preserving all CPU registers, stack alignment, and arguments.
+  - `build.rs`: Integrates `.c` and `.s` compilation and links them directly into `libmlt_7.so` with `-Wl,-soname,libmlt-7.so.7`.
+  - `src/abi.rs`: Rust implementations for intercepted functions (`mlt_factory_init`, `mlt_factory_close`).
+- **Status**: Verified working with integration tests (`tests/abi_shim_test.rs`), `cargo test`, and `flatpak run --command=melt org.kde.kdenlive -version`.
+
+### Phase 6: Direct Vulkan/OpenGL Compute Shaders & Extended Blend Modes [FUTURE]
 - **Goal**: Offload compositing blits directly to Vulkan / OpenGL compute shaders to scale throughput towards 60+ fps.
 - **Implementation**:
   - Transition from SIMD/CPU blitter to Vulkan compute pipelines sharing memory surfaces directly with VA-API/DMA-BUF encoder.

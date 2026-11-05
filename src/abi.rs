@@ -1,63 +1,54 @@
 use crate::logger::log_msg;
-use std::ffi::{c_char, c_int, c_void};
+use crate::shim::{real_mlt_factory_close, real_mlt_factory_init, real_mlt_profile_init};
+use std::ffi::{CStr, c_char, c_void};
 
 pub type MltProfile = *mut c_void;
-pub type MltProducer = *mut c_void;
-pub type MltTractor = *mut c_void;
-pub type MltConsumer = *mut c_void;
-pub type MltFrame = *mut c_void;
+pub type MltRepository = *mut c_void;
 
 #[no_mangle]
-pub extern "C" fn mlt_factory_init(_directory: *const c_char) -> c_int {
-    log_msg("ABI", "mlt_factory_init called");
-    0
+pub extern "C" fn mlt_factory_init(directory: *const c_char) -> MltRepository {
+    log_msg("ABI", "mlt_factory_init intercepted by FastMelt proxy");
+    unsafe {
+        if !real_mlt_factory_init.is_null() {
+            let func: extern "C" fn(*const c_char) -> MltRepository =
+                std::mem::transmute(real_mlt_factory_init);
+            let repo = func(directory);
+            log_msg("ABI", &format!("real_mlt_factory_init returned repository pointer: {:?}", repo));
+            repo
+        } else {
+            log_msg("ABI", "Error: real_mlt_factory_init is null!");
+            std::ptr::null_mut()
+        }
+    }
 }
 
 #[no_mangle]
 pub extern "C" fn mlt_factory_close() {
-    log_msg("ABI", "mlt_factory_close called");
+    log_msg("ABI", "mlt_factory_close intercepted by FastMelt proxy");
+    unsafe {
+        if !real_mlt_factory_close.is_null() {
+            let func: extern "C" fn() = std::mem::transmute(real_mlt_factory_close);
+            func();
+        }
+    }
 }
 
 #[no_mangle]
-pub extern "C" fn mlt_profile_init(_name: *const c_char) -> MltProfile {
-    log_msg("ABI", "mlt_profile_init called");
-    // Return dummy profile pointer
-    Box::into_raw(Box::new(1080u32)) as MltProfile
+pub extern "C" fn mlt_profile_init(name: *const c_char) -> MltProfile {
+    let name_str = if !name.is_null() {
+        unsafe { CStr::from_ptr(name).to_string_lossy().into_owned() }
+    } else {
+        "default".to_string()
+    };
+    log_msg("ABI", &format!("mlt_profile_init intercepted (profile: {})", name_str));
+    unsafe {
+        if !real_mlt_profile_init.is_null() {
+            let func: extern "C" fn(*const c_char) -> MltProfile =
+                std::mem::transmute(real_mlt_profile_init);
+            let prof = func(name);
+            prof
+        } else {
+            std::ptr::null_mut()
+        }
+    }
 }
-
-#[no_mangle]
-pub extern "C" fn mlt_profile_load_file(_path: *const c_char) -> MltProfile {
-    log_msg("ABI", "mlt_profile_load_file called");
-    Box::into_raw(Box::new(1920u32)) as MltProfile
-}
-
-#[no_mangle]
-pub extern "C" fn mlt_producer_init() -> MltProducer {
-    log_msg("ABI", "mlt_producer_init called");
-    Box::into_raw(Box::new(1u32)) as MltProducer
-}
-
-#[no_mangle]
-pub extern "C" fn mlt_tractor_init() -> MltTractor {
-    log_msg("ABI", "mlt_tractor_init called");
-    Box::into_raw(Box::new(2u32)) as MltTractor
-}
-
-#[no_mangle]
-pub extern "C" fn mlt_consumer_init() -> MltConsumer {
-    log_msg("ABI", "mlt_consumer_init called");
-    Box::into_raw(Box::new(3u32)) as MltConsumer
-}
-
-#[no_mangle]
-pub extern "C" fn mlt_consumer_start(_consumer: MltConsumer) -> c_int {
-    log_msg("ABI", "mlt_consumer_start called");
-    0
-}
-
-#[no_mangle]
-pub extern "C" fn mlt_consumer_stop(_consumer: MltConsumer) -> c_int {
-    log_msg("ABI", "mlt_consumer_stop called");
-    0
-}
-
