@@ -365,7 +365,7 @@ impl MltProject {
                     project.profile.display_aspect_num = node.attribute("display_aspect_num").and_then(|v| v.parse().ok()).unwrap_or(9);
                     project.profile.display_aspect_den = node.attribute("display_aspect_den").and_then(|v| v.parse().ok()).unwrap_or(16);
                 }
-                "producer" => {
+                "producer" | "chain" => {
                     if let Some(id) = node.attribute("id") {
                         let mut resource = String::new();
                         let mut service = String::new();
