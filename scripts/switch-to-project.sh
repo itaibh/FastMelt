@@ -34,9 +34,11 @@ fi
 # Ensure target/release/libmlt.so symlink exists in project
 ln -sf "libmlt_7.so" "$TARGET_RELEASE_DIR/libmlt.so"
 
-# 2. Update bin/melt
-echo "[*] Pointing $BIN_DIR/melt -> $PROJECT_MELT"
-ln -sf "$PROJECT_MELT" "$BIN_DIR/melt"
+# 2. Update bin/melt -> melt-7 (stock CLI client using unified FastMelt libmlt)
+if [ -f "$BIN_DIR/melt-7" ]; then
+    echo "[*] Pointing $BIN_DIR/melt -> melt-7 (uses unified FastMelt libmlt)"
+    ln -sf "melt-7" "$BIN_DIR/melt"
+fi
 
 # 3. Update lib/libmlt.so
 echo "[*] Pointing $LIB_DIR/libmlt.so -> $PROJECT_LIBMLT"

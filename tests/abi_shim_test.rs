@@ -53,7 +53,14 @@ fn test_libmlt_shim_export_and_forwarding() {
         assert!(!prof.is_null(), "mlt_profile_init returned null profile");
         profile_close(prof);
 
-        // 4. Test intercepted symbol: mlt_factory_close
+        // 4. Test intercepted symbol: mlt_consumer_start
+        type MltConsumerStartFn = unsafe extern "C" fn(*mut c_void) -> std::ffi::c_int;
+        let consumer_start: libloading::Symbol<MltConsumerStartFn> = lib
+            .get(b"mlt_consumer_start\0")
+            .expect("Symbol mlt_consumer_start missing");
+        println!("mlt_consumer_start symbol found: {:?}", *consumer_start);
+
+        // 5. Test intercepted symbol: mlt_factory_close
         type MltFactoryCloseFn = unsafe extern "C" fn();
         let factory_close: libloading::Symbol<MltFactoryCloseFn> = lib
             .get(b"mlt_factory_close\0")

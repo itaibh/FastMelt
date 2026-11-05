@@ -499,11 +499,13 @@ mlt_consumer_service:
     jmp *real_mlt_consumer_service(%rip)
 .size mlt_consumer_service, . - mlt_consumer_service
 
+/*
 .global mlt_consumer_start
 .type mlt_consumer_start, @function
 mlt_consumer_start:
     jmp *real_mlt_consumer_start(%rip)
 .size mlt_consumer_start, . - mlt_consumer_start
+*/
 
 .global mlt_consumer_stop
 .type mlt_consumer_stop, @function
