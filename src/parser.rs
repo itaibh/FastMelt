@@ -96,13 +96,17 @@ pub enum FilterType {
     Transparency(Vec<(u64, f32)>),
     Subtitles(String),
     HorizontalFlip,
-    Passthrough(String),
+    Passthrough {
+        service: String,
+        properties: HashMap<String, String>,
+    },
 }
 
 #[derive(Debug, Clone)]
 pub struct Filter {
     pub id: String,
     pub filter_type: FilterType,
+    pub properties: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -330,6 +334,31 @@ impl MltProject {
         let mut project = MltProject::default();
         let mut last_tractor_id = None;
 
+        // Extract root attribute from <mlt> if present
+        let root_elem = doc.root_element();
+        if root_elem.tag_name().name() == "mlt" {
+            if let Some(r) = root_elem.attribute("root") {
+                if !r.is_empty() {
+                    project.root_dir = Some(PathBuf::from(r));
+                }
+            }
+        }
+
+        // Also check if any property child under <mlt> specifies root or kdenlive:docfolder
+        for child in root_elem.children() {
+            if child.tag_name().name() == "property" {
+                if child.attribute("name") == Some("root")
+                    || child.attribute("name") == Some("kdenlive:docfolder")
+                {
+                    if let Some(text) = child.text() {
+                        if !text.is_empty() && project.root_dir.is_none() {
+                            project.root_dir = Some(PathBuf::from(text));
+                        }
+                    }
+                }
+            }
+        }
+
         for node in doc.descendants() {
             match node.tag_name().name() {
                 "profile" => {
@@ -340,7 +369,7 @@ impl MltProject {
                     project.profile.display_aspect_num = node.attribute("display_aspect_num").and_then(|v| v.parse().ok()).unwrap_or(9);
                     project.profile.display_aspect_den = node.attribute("display_aspect_den").and_then(|v| v.parse().ok()).unwrap_or(16);
                 }
-                "producer" => {
+                "producer" | "chain" => {
                     if let Some(id) = node.attribute("id") {
                         let mut resource = String::new();
                         let mut service = String::new();
@@ -720,10 +749,12 @@ impl MltProject {
             let mut deform_y_str = String::new();
             let mut transparency_str = String::new();
             let mut disabled = false;
+            let mut properties = HashMap::new();
 
             for prop in child.children().filter(|c| c.tag_name().name() == "property") {
                 if let Some(name) = prop.attribute("name") {
                     let val = prop.text().unwrap_or("").trim();
+                    properties.insert(name.to_string(), val.to_string());
                     match name {
                         "disable" if val == "1" => disabled = true,
                         "mlt_service" => service = val.to_string(),
@@ -754,6 +785,7 @@ impl MltProject {
             }
 
             let filter_type = if service == "qtblend" {
+                let rotate_center = rotate_center || properties.get("rotate_anchor").map(|a| a.contains("0.5 0.5")).unwrap_or(false);
                 let keyframes = Self::parse_rect_keyframes(&rect_str, fps_num, fps_den);
                 let rotation_kfs = Self::parse_float_keyframes(&rotation_str, fps_num, fps_den);
                 FilterType::QtBlend {
@@ -799,8 +831,6 @@ impl MltProject {
                 let color = Self::parse_color_str(raw_c);
                 let amount = tint_amount_str.split('=').last().unwrap_or("1.0").trim().parse().unwrap_or(1.0);
                 FilterType::Tint { color, amount }
-            } else if service == "avfilter.hflip" {
-                FilterType::HorizontalFlip
             } else if service.contains("gblur") {
                 let s_str = if !sigma_str.is_empty() {
                     &sigma_str
@@ -810,12 +840,16 @@ impl MltProject {
                 let sigma = s_str.split('=').last().unwrap_or("5.0").trim().parse().unwrap_or(5.0);
                 FilterType::GaussianBlur { sigma }
             } else {
-                FilterType::Passthrough(service.clone())
+                FilterType::Passthrough {
+                    service: service.clone(),
+                    properties: properties.clone(),
+                }
             };
 
             filters.push(Filter {
                 id,
                 filter_type,
+                properties,
             });
         }
         filters

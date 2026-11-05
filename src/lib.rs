@@ -7,6 +7,7 @@ pub mod fallback;
 pub mod logger;
 pub mod parser;
 pub mod pipeline;
+pub mod shim;
 
 pub use abi::*;
 pub use audio::*;
@@ -17,6 +18,7 @@ pub use fallback::UpstreamMlt;
 pub use logger::{get_log_paths, log_msg};
 pub use parser::MltProject;
 pub use pipeline::FrameBuffer;
+pub use shim::*;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 

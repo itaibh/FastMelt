@@ -77,7 +77,20 @@ if [ -L "$LIBMLT7_LINK" ]; then
     else
         LIBMLT7_STATUS="[CUSTOM] $LIBMLT7_TARGET"
     fi
-    echo "  libmlt-7.so: $LIBMLT7_TARGET -> $LIBMLT7_STATUS"
+    echo "  libmlt-7.so:   $LIBMLT7_TARGET -> $LIBMLT7_STATUS"
+fi
+
+LIBMLT77_LINK="$LIB_DIR/libmlt-7.so.7"
+if [ -L "$LIBMLT77_LINK" ]; then
+    LIBMLT77_TARGET="$(readlink "$LIBMLT77_LINK")"
+    if [[ "$LIBMLT77_TARGET" == *"$PROJECT_LIBMLT"* || "$LIBMLT77_TARGET" == *"$REPO_DIR"* ]]; then
+        LIBMLT77_STATUS="[PROJECT] FastMelt"
+    elif [[ "$LIBMLT77_TARGET" == "libmlt-7.so.7.43.0"* ]]; then
+        LIBMLT77_STATUS="[ORIGINAL] Stock MLT"
+    else
+        LIBMLT77_STATUS="[CUSTOM] $LIBMLT77_TARGET"
+    fi
+    echo "  libmlt-7.so.7: $LIBMLT77_TARGET -> $LIBMLT77_STATUS"
 fi
 
 echo "=========================================================="

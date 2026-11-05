@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use crate::cache::TextureCache;
+use crate::fallback::UpstreamClipRenderer;
 use crate::parser::{FilterType, KeyframeRect, MltProject, Playlist, ProducerSource};
 use crate::pipeline::FrameBuffer;
 
@@ -7,6 +8,7 @@ pub struct TimelineEvaluator<'a> {
     project: &'a MltProject,
     cache: &'a mut TextureCache,
     nested_projects: std::collections::HashMap<PathBuf, MltProject>,
+    upstream_renderers: std::collections::HashMap<String, Option<UpstreamClipRenderer>>,
 }
 
 impl<'a> TimelineEvaluator<'a> {
@@ -15,6 +17,7 @@ impl<'a> TimelineEvaluator<'a> {
             project,
             cache,
             nested_projects: std::collections::HashMap::new(),
+            upstream_renderers: std::collections::HashMap::new(),
         }
     }
 
@@ -229,7 +232,46 @@ impl<'a> TimelineEvaluator<'a> {
                 let tint_opt = tint.map(|(c, _)| c);
                 let sigma_val = gaussian_blur.unwrap_or(0.0);
 
-                if let Some(img) = self.cache.get_or_load_processed(&resolved_path, tint_opt, sigma_val, hflip).cloned() {
+                // Check if any filter is an unsupported passthrough filter (e.g. rotoscoping, mask_start, shape)
+                let has_passthrough = all_filters.iter().any(|f| matches!(f.filter_type, FilterType::Passthrough { .. }));
+
+                if has_passthrough {
+                    let ef_keys: Vec<_> = extra_filters
+                        .into_iter()
+                        .flatten()
+                        .map(|f| f.id.as_str())
+                        .collect();
+                    let cache_key = format!("{}:{}:{:?}", producer.id, resolved_path.display(), ef_keys);
+                    let canvas_w = fb.width;
+                    let canvas_h = fb.height;
+
+                    let renderer = self.upstream_renderers.entry(cache_key).or_insert_with(|| {
+                        let entry_filters: Vec<_> = extra_filters.into_iter().flatten().cloned().collect();
+                        UpstreamClipRenderer::new_for_clip(
+                            &producer.id,
+                            resolved_path.to_str().unwrap_or(""),
+                            &producer.filters,
+                            &entry_filters,
+                            canvas_w,
+                            canvas_h,
+                        )
+                    });
+
+                    if let Some(r) = renderer {
+                        if let Some((rw, rh, bytes)) = r.render_frame(clip_frame, canvas_w, canvas_h) {
+                            fb.blend_raw(&bytes, rw, rh, 0, 0, canvas_w, canvas_h, 1.0);
+                            return;
+                        }
+                    }
+                }
+
+                let img_opt = if TextureCache::is_sequence_pattern(&resolved_path) {
+                    self.cache.get_or_load_sequence_frame(&resolved_path, clip_frame, tint_opt, sigma_val, hflip).cloned()
+                } else {
+                    self.cache.get_or_load_processed(&resolved_path, tint_opt, sigma_val, hflip).cloned()
+                };
+
+                if let Some(img) = img_opt {
                     let src_w = img.width();
                     let src_h = img.height();
                     let canvas_w = fb.width as f32;
@@ -489,6 +531,7 @@ impl<'a> TimelineEvaluator<'a> {
                                 project: &sub_proj,
                                 cache: self.cache,
                                 nested_projects: std::collections::HashMap::new(),
+                                upstream_renderers: std::collections::HashMap::new(),
                             };
                             sub_evaluator.render_tractor(&root_id, clip_frame, &mut sub_fb, depth + 1);
                         }
@@ -546,25 +589,203 @@ impl<'a> TimelineEvaluator<'a> {
                     }
                 }
             }
-            ProducerSource::Video(_) => {
-                // Video decoder pass if present
+            ProducerSource::Video(rel_or_abs_path) => {
+                let resolved_path = self.resolve_path(rel_or_abs_path);
+
+                let mut transparency_opacity = 1.0f32;
+                if let Some(extras) = extra_filters {
+                    for f in extras {
+                        if let FilterType::Transparency(ref kfs) = f.filter_type {
+                            transparency_opacity *= MltProject::interpolate_float(kfs, clip_frame);
+                        }
+                    }
+                }
+                for f in &producer.filters {
+                    if let FilterType::Transparency(ref kfs) = f.filter_type {
+                        transparency_opacity *= MltProject::interpolate_float(kfs, clip_frame);
+                    }
+                }
+
+                if let Some(img) = self.cache.get_or_load_video_frame(
+                    &resolved_path,
+                    clip_frame,
+                    self.project.profile.frame_rate_num,
+                    self.project.profile.frame_rate_den,
+                ).cloned() {
+                    let src_w = img.width();
+                    let src_h = img.height();
+                    let canvas_w = fb.width as f32;
+                    let canvas_h = fb.height as f32;
+
+                    // 1. Resolve Producer-level transform
+                    let mut prod_matrix = None;
+                    let mut prod_opacity = 1.0f32;
+
+                    for f in &producer.filters {
+                        if let FilterType::QtBlend { rect_keyframes, rotation_keyframes, rotate_center, distort } = &f.filter_type {
+                            let (rx, ry, rw, rh, op) = KeyframeRect::interpolate(rect_keyframes, clip_frame);
+                            let rot = MltProject::interpolate_float(rotation_keyframes, clip_frame);
+                            prod_opacity = op;
+
+                            let is_native_size = rx.abs() <= 1.0
+                                && ry.abs() <= 1.0
+                                && (rw - src_w as f32).abs() <= 1.0
+                                && (rh - src_h as f32).abs() <= 1.0
+                                && rot.abs() <= 0.001;
+
+                            if !is_native_size {
+                                prod_matrix = Some(FrameBuffer::build_affine_matrix(
+                                    src_w as f32,
+                                    src_h as f32,
+                                    rx,
+                                    ry,
+                                    rw,
+                                    rh,
+                                    rot,
+                                    *rotate_center,
+                                    *distort,
+                                ));
+                                break;
+                            }
+                        }
+                    }
+
+                    // 2. Resolve Playlist entry-level transforms
+                    let prod_dar = src_w as f32 / src_h as f32;
+                    let mut entry_opacity = 1.0f32;
+
+                    let mut qtblends = Vec::new();
+                    if let Some(extras) = extra_filters {
+                        for f in extras {
+                            if let FilterType::QtBlend { rect_keyframes, rotation_keyframes, rotate_center, distort } = &f.filter_type {
+                                let (rx, ry, rw, rh, op) = KeyframeRect::interpolate(rect_keyframes, clip_frame);
+                                let rot = MltProject::interpolate_float(rotation_keyframes, clip_frame);
+                                let is_full_canvas = rx.abs() <= 1.0
+                                    && ry.abs() <= 1.0
+                                    && (rw - canvas_w).abs() <= 1.0
+                                    && (rh - canvas_h).abs() <= 1.0
+                                    && rot.abs() <= 0.001;
+                                qtblends.push((rx, ry, rw, rh, op, rot, *rotate_center, *distort, is_full_canvas));
+                            }
+                        }
+                    }
+
+                    let composite_matrix = if let Some(m_prod) = prod_matrix {
+                        let mut curr = m_prod;
+                        if !qtblends.is_empty() {
+                            for c in &qtblends {
+                                if !c.8 || c.5.abs() > 0.001 || (c.4 - 1.0).abs() > 0.001 {
+                                    let m_step = FrameBuffer::build_affine_matrix_with_dar(
+                                        canvas_w,
+                                        canvas_h,
+                                        c.0,
+                                        c.1,
+                                        c.2,
+                                        c.3,
+                                        c.5,
+                                        c.6,
+                                        c.7,
+                                        None,
+                                    );
+                                    curr = m_step * curr;
+                                    entry_opacity *= c.4;
+                                }
+                            }
+                        }
+                        curr
+                    } else {
+                        let non_canvas_entry = qtblends.iter().find(|c| !c.8);
+                        if let Some(&specific) = non_canvas_entry {
+                            let m_place = FrameBuffer::build_affine_matrix_with_dar(
+                                src_w as f32,
+                                src_h as f32,
+                                specific.0,
+                                specific.1,
+                                specific.2,
+                                specific.3,
+                                specific.5,
+                                specific.6,
+                                specific.7,
+                                Some(prod_dar),
+                            );
+                            entry_opacity *= specific.4;
+
+                            let mut curr = m_place;
+                            for c in &qtblends {
+                                if c.8 && c.5.abs() > 0.001 {
+                                    let m_rot = FrameBuffer::build_affine_matrix_with_dar(
+                                        canvas_w,
+                                        canvas_h,
+                                        c.0,
+                                        c.1,
+                                        c.2,
+                                        c.3,
+                                        c.5,
+                                        c.6,
+                                        c.7,
+                                        None,
+                                    );
+                                    curr = m_rot * curr;
+                                    entry_opacity *= c.4;
+                                }
+                            }
+                            curr
+                        } else {
+                            let m_default = FrameBuffer::build_affine_matrix(
+                                src_w as f32,
+                                src_h as f32,
+                                0.0,
+                                0.0,
+                                canvas_w,
+                                canvas_h,
+                                0.0,
+                                false,
+                                false,
+                            );
+                            let mut curr = m_default;
+                            for c in &qtblends {
+                                if c.5.abs() > 0.001 || (c.4 - 1.0).abs() > 0.001 {
+                                    let m_rot = FrameBuffer::build_affine_matrix_with_dar(
+                                        canvas_w,
+                                        canvas_h,
+                                        c.0,
+                                        c.1,
+                                        c.2,
+                                        c.3,
+                                        c.5,
+                                        c.6,
+                                        c.7,
+                                        None,
+                                    );
+                                    curr = m_rot * curr;
+                                    entry_opacity *= c.4;
+                                }
+                            }
+                            curr
+                        }
+                    };
+
+                    let total_opacity = prod_opacity * entry_opacity * transparency_opacity;
+                    fb.blend_affine_matrix(img.as_raw(), src_w, src_h, composite_matrix, total_opacity);
+                }
             }
         }
     }
 
     fn resolve_path(&self, p: &std::path::Path) -> PathBuf {
-        if p.is_absolute() && p.exists() {
+        let is_seq = TextureCache::is_sequence_pattern(p);
+        if p.is_absolute() && (p.exists() || (is_seq && p.parent().map_or(false, |d| d.exists()))) {
             return p.to_path_buf();
         }
         if let Some(ref root) = self.project.root_dir {
             let candidate = root.join(p);
-            if candidate.exists() {
+            if candidate.exists() || (is_seq && candidate.parent().map_or(false, |d| d.exists())) {
                 return candidate;
             }
         }
         if let Ok(home) = std::env::var("HOME") {
             let candidate = std::path::Path::new(&home).join(p);
-            if candidate.exists() {
+            if candidate.exists() || (is_seq && candidate.parent().map_or(false, |d| d.exists())) {
                 return candidate;
             }
         }
@@ -590,6 +811,10 @@ impl<'a> TimelineEvaluator<'a> {
                 if c3.exists() { return c3; }
                 let c4 = base.join("e01").join(fname);
                 if c4.exists() { return c4; }
+                let c4_2 = base.join("e02").join(fname);
+                if c4_2.exists() { return c4_2; }
+                let c4_3 = base.join("e03").join(fname);
+                if c4_3.exists() { return c4_3; }
                 let c5 = base.join("library").join(fname);
                 if c5.exists() { return c5; }
             }

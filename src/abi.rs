@@ -1,63 +1,133 @@
 use crate::logger::log_msg;
-use std::ffi::{c_char, c_int, c_void};
+use crate::shim::{
+    real_mlt_consumer_properties, real_mlt_consumer_service, real_mlt_consumer_start,
+    real_mlt_factory_close, real_mlt_factory_init, real_mlt_producer_properties,
+    real_mlt_profile_init, real_mlt_properties_get, real_mlt_service_get_producer,
+};
+use std::ffi::{CStr, c_char, c_int, c_void};
 
 pub type MltProfile = *mut c_void;
-pub type MltProducer = *mut c_void;
-pub type MltTractor = *mut c_void;
+pub type MltRepository = *mut c_void;
 pub type MltConsumer = *mut c_void;
-pub type MltFrame = *mut c_void;
 
 #[no_mangle]
-pub extern "C" fn mlt_factory_init(_directory: *const c_char) -> c_int {
-    log_msg("ABI", "mlt_factory_init called");
-    0
+pub extern "C" fn mlt_factory_init(directory: *const c_char) -> MltRepository {
+    log_msg("ABI", "mlt_factory_init intercepted by FastMelt proxy");
+    unsafe {
+        if !real_mlt_factory_init.is_null() {
+            let func: extern "C" fn(*const c_char) -> MltRepository =
+                std::mem::transmute(real_mlt_factory_init);
+            let repo = func(directory);
+            log_msg("ABI", &format!("real_mlt_factory_init returned repository pointer: {:?}", repo));
+            repo
+        } else {
+            log_msg("ABI", "Error: real_mlt_factory_init is null!");
+            std::ptr::null_mut()
+        }
+    }
 }
 
 #[no_mangle]
 pub extern "C" fn mlt_factory_close() {
-    log_msg("ABI", "mlt_factory_close called");
+    log_msg("ABI", "mlt_factory_close intercepted by FastMelt proxy");
+    unsafe {
+        if !real_mlt_factory_close.is_null() {
+            let func: extern "C" fn() = std::mem::transmute(real_mlt_factory_close);
+            func();
+        }
+    }
 }
 
 #[no_mangle]
-pub extern "C" fn mlt_profile_init(_name: *const c_char) -> MltProfile {
-    log_msg("ABI", "mlt_profile_init called");
-    // Return dummy profile pointer
-    Box::into_raw(Box::new(1080u32)) as MltProfile
+pub extern "C" fn mlt_profile_init(name: *const c_char) -> MltProfile {
+    unsafe {
+        crate::shim::fastmelt_init_dispatch();
+    }
+    let name_str = if !name.is_null() {
+        unsafe { CStr::from_ptr(name).to_string_lossy().into_owned() }
+    } else {
+        "default".to_string()
+    };
+    log_msg("ABI", &format!("mlt_profile_init intercepted (profile: {})", name_str));
+    unsafe {
+        if !real_mlt_profile_init.is_null() {
+            let func: extern "C" fn(*const c_char) -> MltProfile =
+                std::mem::transmute(real_mlt_profile_init);
+            let prof = func(name);
+            prof
+        } else {
+            std::ptr::null_mut()
+        }
+    }
 }
 
 #[no_mangle]
-pub extern "C" fn mlt_profile_load_file(_path: *const c_char) -> MltProfile {
-    log_msg("ABI", "mlt_profile_load_file called");
-    Box::into_raw(Box::new(1920u32)) as MltProfile
-}
+pub extern "C" fn mlt_consumer_start(consumer: MltConsumer) -> c_int {
+    log_msg("ABI", "mlt_consumer_start intercepted by FastMelt libmlt proxy");
+    unsafe {
+        if real_mlt_consumer_start.is_null() {
+            log_msg("ABI", "Error: real_mlt_consumer_start is null!");
+            return 1;
+        }
 
-#[no_mangle]
-pub extern "C" fn mlt_producer_init() -> MltProducer {
-    log_msg("ABI", "mlt_producer_init called");
-    Box::into_raw(Box::new(1u32)) as MltProducer
-}
+        let fallback_fn: extern "C" fn(MltConsumer) -> c_int =
+            std::mem::transmute(real_mlt_consumer_start);
 
-#[no_mangle]
-pub extern "C" fn mlt_tractor_init() -> MltTractor {
-    log_msg("ABI", "mlt_tractor_init called");
-    Box::into_raw(Box::new(2u32)) as MltTractor
-}
+        // 1. Inspect consumer properties
+        if real_mlt_consumer_properties.is_null() || real_mlt_properties_get.is_null() {
+            return fallback_fn(consumer);
+        }
 
-#[no_mangle]
-pub extern "C" fn mlt_consumer_init() -> MltConsumer {
-    log_msg("ABI", "mlt_consumer_init called");
-    Box::into_raw(Box::new(3u32)) as MltConsumer
-}
+        let get_props: extern "C" fn(MltConsumer) -> *mut c_void =
+            std::mem::transmute(real_mlt_consumer_properties);
+        let props = get_props(consumer);
+        if props.is_null() {
+            return fallback_fn(consumer);
+        }
 
-#[no_mangle]
-pub extern "C" fn mlt_consumer_start(_consumer: MltConsumer) -> c_int {
-    log_msg("ABI", "mlt_consumer_start called");
-    0
-}
+        let get_prop: extern "C" fn(*mut c_void, *const c_char) -> *const c_char =
+            std::mem::transmute(real_mlt_properties_get);
 
-#[no_mangle]
-pub extern "C" fn mlt_consumer_stop(_consumer: MltConsumer) -> c_int {
-    log_msg("ABI", "mlt_consumer_stop called");
-    0
-}
+        let target_ptr = get_prop(props, b"target\0".as_ptr() as *const c_char);
+        if target_ptr.is_null() {
+            // Preview monitor (e.g. sdl2/glsl in Kdenlive GUI) -> route to stock MLT
+            log_msg("ABI", "Consumer has no target (GUI preview monitor). Delegating directly to stock MLT...");
+            return fallback_fn(consumer);
+        }
 
+        let target_str = CStr::from_ptr(target_ptr).to_string_lossy().into_owned();
+        log_msg("ABI", &format!("Render consumer detected: target = {}", target_str));
+
+        // 2. Inspect connected producer resource
+        let mut xml_path: Option<String> = None;
+        if !real_mlt_consumer_service.is_null()
+            && !real_mlt_service_get_producer.is_null()
+            && !real_mlt_producer_properties.is_null()
+        {
+            let get_service: extern "C" fn(MltConsumer) -> *mut c_void =
+                std::mem::transmute(real_mlt_consumer_service);
+            let service = get_service(consumer);
+            if !service.is_null() {
+                let get_producer: extern "C" fn(*mut c_void) -> *mut c_void =
+                    std::mem::transmute(real_mlt_service_get_producer);
+                let producer = get_producer(service);
+                if !producer.is_null() {
+                    let get_prod_props: extern "C" fn(*mut c_void) -> *mut c_void =
+                        std::mem::transmute(real_mlt_producer_properties);
+                    let prod_props = get_prod_props(producer);
+                    if !prod_props.is_null() {
+                        let res_ptr = get_prop(prod_props, b"resource\0".as_ptr() as *const c_char);
+                        if !res_ptr.is_null() {
+                            xml_path = Some(CStr::from_ptr(res_ptr).to_string_lossy().into_owned());
+                        }
+                    }
+                }
+            }
+        }
+
+        log_msg("ABI", &format!("Connected producer resource: {:?}", xml_path));
+
+        // Delegate to stock MLT consumer (or when rendering directly, let FastMelt handle rendering)
+        fallback_fn(consumer)
+    }
+}
