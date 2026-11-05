@@ -244,6 +244,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "fast-melt"
+version = "0.1.11"
+dependencies = [
+ "clap",
+ "env_logger",
+ "glam",
+ "image",
+ "libloading",
+ "log",
+ "rayon",
+ "roxmltree",
+]
+
+[[package]]
 name = "fdeflate"
 version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -392,20 +406,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
-]
-
-[[package]]
-name = "olive-mlt-bridge"
-version = "0.1.12"
-dependencies = [
- "clap",
- "env_logger",
- "glam",
- "image",
- "libloading",
- "log",
- "rayon",
- "roxmltree",
 ]
 
 [[package]]

@@ -11,21 +11,22 @@ pub fn get_log_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
 
     // 1. Explicit environment variable override
-    if let Ok(custom) = std::env::var("OLIVE_LOG_FILE") {
+    if let Ok(custom) = std::env::var("FASTMELT_LOG_FILE").or_else(|_| std::env::var("OLIVE_LOG_FILE")) {
         paths.push(PathBuf::from(custom));
     }
 
     // 2. Project root log file
-    let repo_log = PathBuf::from("/home/itaibh/Projects/OliveMltBridge/olive_mlt.log");
+    let repo_log = PathBuf::from("/home/itaibh/Projects/OliveMltBridge/fastmelt.log");
     paths.push(repo_log);
+    paths.push(PathBuf::from("/home/itaibh/Projects/OliveMltBridge/olive_mlt.log"));
 
     // 3. User home cache
     if let Ok(home) = std::env::var("HOME") {
-        paths.push(PathBuf::from(home).join(".cache/olive_mlt.log"));
+        paths.push(PathBuf::from(home).join(".cache/fastmelt.log"));
     }
 
     // 4. System /tmp fallback
-    paths.push(PathBuf::from("/tmp/olive_mlt.log"));
+    paths.push(PathBuf::from("/tmp/fastmelt.log"));
 
     paths
 }

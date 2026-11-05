@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# OliveMltBridge Switcher for Kdenlive Flatpak
+# FastMelt Switcher for Kdenlive Flatpak
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-    echo "OliveMltBridge Kdenlive Flatpak Switcher"
+    echo "FastMelt Kdenlive Flatpak Switcher"
     echo "Usage: $0 [command] [options]"
     echo
     echo "Commands:"
-    echo "  project     Switch Flatpak to use OliveMltBridge (melt and libmlt.so)"
+    echo "  project     Switch Flatpak to use FastMelt (melt and libmlt.so)"
     echo "  original    Restore Flatpak to original/stock MLT"
     echo "  status      Show current configuration and link targets"
     echo
@@ -27,7 +27,7 @@ if [ -z "$COMMAND" ]; then
     bash "$SCRIPT_DIR/scripts/status.sh"
     echo
     echo "Choose an option:"
-    echo "  1) Use OliveMltBridge (Project Binaries)"
+    echo "  1) Use FastMelt (Project Binaries)"
     echo "  2) Use Original Stock MLT"
     echo "  3) Show Status"
     echo "  4) Exit"
@@ -50,7 +50,7 @@ if [ -z "$COMMAND" ]; then
     esac
 else
     case "$COMMAND" in
-        project|custom|olive)
+        project|custom|fastmelt|olive)
             shift
             bash "$SCRIPT_DIR/scripts/switch-to-project.sh" "$@"
             ;;

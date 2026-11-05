@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Switch Kdenlive Flatpak to use OliveMltBridge (Project Binaries)
+# Switch Kdenlive Flatpak to use FastMelt (Project Binaries)
 
 set -euo pipefail
 
@@ -19,7 +19,7 @@ for arg in "$@"; do
     fi
 done
 
-echo "Switching Kdenlive Flatpak to use OliveMltBridge binaries..."
+echo "Switching Kdenlive Flatpak to use FastMelt binaries..."
 
 # 1. Verify / Build Project Binaries
 if [ ! -f "$PROJECT_MELT" ] || [ ! -f "$PROJECT_LIBMLT" ]; then
@@ -53,7 +53,7 @@ if [ "$INCLUDE_SO7" = true ]; then
 fi
 
 echo
-echo "[✓] Successfully configured Flatpak to use OliveMltBridge!"
+echo "[✓] Successfully configured Flatpak to use FastMelt!"
 echo
 "$SCRIPT_DIR/status.sh"
 

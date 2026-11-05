@@ -1,10 +1,10 @@
 [package]
-name = "olive-mlt-bridge"
+name = "fast-melt"
 version = "0.1.12"
 edition = "2021"
 
 authors = ["Itai Bar-Haim", "Antigravity"]
-description = "A high-performance GPU-accelerated drop-in replacement for MLT and melt in Kdenlive"
+description = "FastMelt: A high-performance GPU-accelerated drop-in replacement for MLT and melt in Kdenlive"
 
 [lib]
 name = "mlt_7"
