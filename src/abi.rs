@@ -40,6 +40,9 @@ pub extern "C" fn mlt_factory_close() {
 
 #[no_mangle]
 pub extern "C" fn mlt_profile_init(name: *const c_char) -> MltProfile {
+    unsafe {
+        crate::shim::fastmelt_init_dispatch();
+    }
     let name_str = if !name.is_null() {
         unsafe { CStr::from_ptr(name).to_string_lossy().into_owned() }
     } else {
@@ -124,40 +127,7 @@ pub extern "C" fn mlt_consumer_start(consumer: MltConsumer) -> c_int {
 
         log_msg("ABI", &format!("Connected producer resource: {:?}", xml_path));
 
-        // 3. Capability Check: Inspect XML for unsupported features
-        let is_supported = if let Some(ref path) = xml_path {
-            let actual_path = if path.starts_with('/') {
-                std::path::PathBuf::from(path)
-            } else {
-                std::env::current_dir().unwrap_or_default().join(path)
-            };
-
-            if let Ok(content) = std::fs::read_to_string(&actual_path) {
-                // If project uses unsupported filters like rotoscoping, shape, or matte:
-                let has_unsupported = content.contains("rotoscoping")
-                    || content.contains("mask_start")
-                    || content.contains("frei0r.")
-                    || content.contains("matte");
-
-                if has_unsupported {
-                    log_msg("ABI", "Project uses unsupported features (rotoscoping/matte). Gracefully delegating to stock MLT engine...");
-                    false
-                } else {
-                    log_msg("ABI", "All project features supported! FastMelt hardware acceleration enabled.");
-                    true
-                }
-            } else {
-                false
-            }
-        } else {
-            false
-        };
-
-        if !is_supported {
-            return fallback_fn(consumer);
-        }
-
-        // For fully supported projects, execute render via stock MLT consumer (or hardware path)
+        // Delegate to stock MLT consumer (or when rendering directly, let FastMelt handle rendering)
         fallback_fn(consumer)
     }
 }

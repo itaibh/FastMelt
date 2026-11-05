@@ -172,20 +172,6 @@ fn main() {
         std::process::exit(code);
     }
 
-    // Capability Check: Gracefully delegate to stock MLT if project uses unsupported features (rotoscoping, shape, matte, frei0r)
-    let has_unsupported = xml_content.contains("rotoscoping")
-        || xml_content.contains("mask_start")
-        || xml_content.contains("frei0r.")
-        || xml_content.contains("matte");
-
-    if has_unsupported {
-        log_msg("MELT", "Project uses unsupported features (e.g. rotoscoping/matte). Gracefully delegating to stock upstream melt...");
-        let code = UpstreamMlt::delegate_to_stock_melt(&args[1..]).unwrap_or(1);
-        log_msg("MELT", &format!("Upstream melt returned code: {}", code));
-        log_msg("MELT", "=== INVOCATION END ===");
-        std::process::exit(code);
-    }
-
     // Check if user explicitly requested isolated benchmark simulation mode
     if env::var("FASTMELT_BENCHMARK_SIMULATION").is_ok() || env::var("OLIVE_BENCHMARK_SIMULATION").is_ok() {
         log_msg("MELT", "Benchmark simulation set: Running in-memory framebuffer benchmark loop...");

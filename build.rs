@@ -62,8 +62,9 @@ fn main() {
     }
 
     // 4. Link directives
-    println!("cargo:rustc-cdylib-link-arg={}", dispatch_o.display());
-    println!("cargo:rustc-cdylib-link-arg={}", trampolines_o.display());
+    println!("cargo:rustc-link-search=native={}", out_dir);
+    println!("cargo:rustc-link-arg={}", dispatch_o.display());
+    println!("cargo:rustc-link-arg={}", trampolines_o.display());
     println!("cargo:rustc-link-lib=dl");
 
     // Pass version script and soname to cdylib linker

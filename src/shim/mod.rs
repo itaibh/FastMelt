@@ -583,4 +583,5 @@ extern "C" {
     pub static real_mlt_version_get_revision: *mut c_void;
     pub static real_mlt_version_get_string: *mut c_void;
     pub static real_mlt_vlog: *mut c_void;
+    pub fn fastmelt_init_dispatch();
 }

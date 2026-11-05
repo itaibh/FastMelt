@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use crate::cache::TextureCache;
+use crate::fallback::UpstreamClipRenderer;
 use crate::parser::{FilterType, KeyframeRect, MltProject, Playlist, ProducerSource};
 use crate::pipeline::FrameBuffer;
 
@@ -7,6 +8,7 @@ pub struct TimelineEvaluator<'a> {
     project: &'a MltProject,
     cache: &'a mut TextureCache,
     nested_projects: std::collections::HashMap<PathBuf, MltProject>,
+    upstream_renderers: std::collections::HashMap<String, Option<UpstreamClipRenderer>>,
 }
 
 impl<'a> TimelineEvaluator<'a> {
@@ -15,6 +17,7 @@ impl<'a> TimelineEvaluator<'a> {
             project,
             cache,
             nested_projects: std::collections::HashMap::new(),
+            upstream_renderers: std::collections::HashMap::new(),
         }
     }
 
@@ -228,6 +231,39 @@ impl<'a> TimelineEvaluator<'a> {
 
                 let tint_opt = tint.map(|(c, _)| c);
                 let sigma_val = gaussian_blur.unwrap_or(0.0);
+
+                // Check if any filter is an unsupported passthrough filter (e.g. rotoscoping, mask_start, shape)
+                let has_passthrough = all_filters.iter().any(|f| matches!(f.filter_type, FilterType::Passthrough { .. }));
+
+                if has_passthrough {
+                    let ef_keys: Vec<_> = extra_filters
+                        .into_iter()
+                        .flatten()
+                        .map(|f| f.id.as_str())
+                        .collect();
+                    let cache_key = format!("{}:{}:{:?}", producer.id, resolved_path.display(), ef_keys);
+                    let canvas_w = fb.width;
+                    let canvas_h = fb.height;
+
+                    let renderer = self.upstream_renderers.entry(cache_key).or_insert_with(|| {
+                        let entry_filters: Vec<_> = extra_filters.into_iter().flatten().cloned().collect();
+                        UpstreamClipRenderer::new_for_clip(
+                            &producer.id,
+                            resolved_path.to_str().unwrap_or(""),
+                            &producer.filters,
+                            &entry_filters,
+                            canvas_w,
+                            canvas_h,
+                        )
+                    });
+
+                    if let Some(r) = renderer {
+                        if let Some((rw, rh, bytes)) = r.render_frame(clip_frame, canvas_w, canvas_h) {
+                            fb.blend_raw(&bytes, rw, rh, 0, 0, canvas_w, canvas_h, 1.0);
+                            return;
+                        }
+                    }
+                }
 
                 let img_opt = if TextureCache::is_sequence_pattern(&resolved_path) {
                     self.cache.get_or_load_sequence_frame(&resolved_path, clip_frame, tint_opt, sigma_val, hflip).cloned()
@@ -495,6 +531,7 @@ impl<'a> TimelineEvaluator<'a> {
                                 project: &sub_proj,
                                 cache: self.cache,
                                 nested_projects: std::collections::HashMap::new(),
+                                upstream_renderers: std::collections::HashMap::new(),
                             };
                             sub_evaluator.render_tractor(&root_id, clip_frame, &mut sub_fb, depth + 1);
                         }
