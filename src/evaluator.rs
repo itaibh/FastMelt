@@ -248,42 +248,37 @@ impl<'a> TimelineEvaluator<'a> {
                             let rot = MltProject::interpolate_float(rotation_keyframes, clip_frame);
                             prod_opacity = op;
 
-                            prod_matrix = Some(FrameBuffer::build_affine_matrix(
-                                src_w as f32,
-                                src_h as f32,
-                                rx,
-                                ry,
-                                rw,
-                                rh,
-                                rot,
-                                *rotate_center,
-                                *distort,
-                            ));
-                            break;
+                            // If this filter is just the native size bounding box (e.g. 0 0 src_w src_h with no rotation),
+                            // it's MLT's default producer identity, NOT a custom placement!
+                            let is_native_size = rx.abs() <= 1.0
+                                && ry.abs() <= 1.0
+                                && (rw - src_w as f32).abs() <= 1.0
+                                && (rh - src_h as f32).abs() <= 1.0
+                                && rot.abs() <= 0.001;
+
+                            if !is_native_size {
+                                prod_matrix = Some(FrameBuffer::build_affine_matrix(
+                                    src_w as f32,
+                                    src_h as f32,
+                                    rx,
+                                    ry,
+                                    rw,
+                                    rh,
+                                    rot,
+                                    *rotate_center,
+                                    *distort,
+                                ));
+                                break;
+                            }
                         }
                     }
 
-                    let m1 = prod_matrix.unwrap_or_else(|| {
-                        FrameBuffer::build_affine_matrix(
-                            src_w as f32,
-                            src_h as f32,
-                            0.0,
-                            0.0,
-                            canvas_w,
-                            canvas_h,
-                            0.0,
-                            false,
-                            false,
-                        )
-                    });
-
                     // 2. Resolve Playlist entry-level transforms
                     let prod_dar = src_w as f32 / src_h as f32;
-                    let mut current_matrix = m1;
                     let mut entry_opacity = 1.0f32;
 
+                    let mut qtblends = Vec::new();
                     if let Some(extras) = extra_filters {
-                        let mut qtblends = Vec::new();
                         for f in extras {
                             if let FilterType::QtBlend { rect_keyframes, rotation_keyframes, rotate_center, distort } = &f.filter_type {
                                 let (rx, ry, rw, rh, op) = KeyframeRect::interpolate(rect_keyframes, clip_frame);
@@ -295,57 +290,14 @@ impl<'a> TimelineEvaluator<'a> {
                                 qtblends.push((rx, ry, rw, rh, op, rot, *rotate_center, *distort, is_full_canvas));
                             }
                         }
+                    }
 
+                    let composite_matrix = if let Some(m_prod) = prod_matrix {
+                        // Producer has a custom placement transform (e.g. mouth shape placed inside character rig)
+                        let mut curr = m_prod;
                         if !qtblends.is_empty() {
-                            let non_canvas_count = qtblends.iter().filter(|c| !c.8).count();
-
-                            if non_canvas_count == 1 {
-                                let &specific = qtblends.iter().find(|c| !c.8).unwrap();
-                                let m_place = FrameBuffer::build_affine_matrix_with_dar(
-                                    canvas_w,
-                                    canvas_h,
-                                    specific.0,
-                                    specific.1,
-                                    specific.2,
-                                    specific.3,
-                                    specific.5,
-                                    specific.6,
-                                    specific.7,
-                                    Some(prod_dar),
-                                );
-                                current_matrix = m_place * current_matrix;
-                                entry_opacity *= specific.4;
-
-                                for c in &qtblends {
-                                    if c.8 && c.5.abs() > 0.001 {
-                                        let m_rot = FrameBuffer::build_affine_matrix_with_dar(
-                                            canvas_w,
-                                            canvas_h,
-                                            c.0,
-                                            c.1,
-                                            c.2,
-                                            c.3,
-                                            c.5,
-                                            c.6,
-                                            c.7,
-                                            None,
-                                        );
-                                        current_matrix = m_rot * current_matrix;
-                                        entry_opacity *= c.4;
-                                    }
-                                }
-                            } else if non_canvas_count > 1 {
-                                let mut first = true;
-                                for c in &qtblends {
-                                    if c.8 && c.5.abs() <= 0.001 && (c.4 - 1.0).abs() <= 0.001 {
-                                        continue;
-                                    }
-                                    let dar = if first {
-                                        first = false;
-                                        Some(prod_dar)
-                                    } else {
-                                        None
-                                    };
+                            for c in &qtblends {
+                                if !c.8 || c.5.abs() > 0.001 || (c.4 - 1.0).abs() > 0.001 {
                                     let m_step = FrameBuffer::build_affine_matrix_with_dar(
                                         canvas_w,
                                         canvas_h,
@@ -356,36 +308,89 @@ impl<'a> TimelineEvaluator<'a> {
                                         c.5,
                                         c.6,
                                         c.7,
-                                        dar,
+                                        None,
                                     );
-                                    current_matrix = m_step * current_matrix;
+                                    curr = m_step * curr;
                                     entry_opacity *= c.4;
-                                }
-                            } else {
-                                for c in &qtblends {
-                                    if c.5.abs() > 0.001 || (c.4 - 1.0).abs() > 0.001 {
-                                        let m_rot = FrameBuffer::build_affine_matrix_with_dar(
-                                            canvas_w,
-                                            canvas_h,
-                                            c.0,
-                                            c.1,
-                                            c.2,
-                                            c.3,
-                                            c.5,
-                                            c.6,
-                                            c.7,
-                                            None,
-                                        );
-                                        current_matrix = m_rot * current_matrix;
-                                        entry_opacity *= c.4;
-                                    }
                                 }
                             }
                         }
-                    }
+                        curr
+                    } else {
+                        // Producer does not have a custom placement (or only had native 0 0 src_w src_h)
+                        let non_canvas_entry = qtblends.iter().find(|c| !c.8);
+                        if let Some(&specific) = non_canvas_entry {
+                            // Direct placement of source image into entry rect!
+                            let m_place = FrameBuffer::build_affine_matrix_with_dar(
+                                src_w as f32,
+                                src_h as f32,
+                                specific.0,
+                                specific.1,
+                                specific.2,
+                                specific.3,
+                                specific.5,
+                                specific.6,
+                                specific.7,
+                                Some(prod_dar),
+                            );
+                            entry_opacity *= specific.4;
 
-                    // 3. Compose final affine matrix
-                    let composite_matrix = current_matrix;
+                            let mut curr = m_place;
+                            // Apply any additional rotation/distortion filters on the entry
+                            for c in &qtblends {
+                                if c.8 && c.5.abs() > 0.001 {
+                                    let m_rot = FrameBuffer::build_affine_matrix_with_dar(
+                                        canvas_w,
+                                        canvas_h,
+                                        c.0,
+                                        c.1,
+                                        c.2,
+                                        c.3,
+                                        c.5,
+                                        c.6,
+                                        c.7,
+                                        None,
+                                    );
+                                    curr = m_rot * curr;
+                                    entry_opacity *= c.4;
+                                }
+                            }
+                            curr
+                        } else {
+                            // Default: fit image into full canvas coordinates maintaining aspect ratio
+                            let m_default = FrameBuffer::build_affine_matrix(
+                                src_w as f32,
+                                src_h as f32,
+                                0.0,
+                                0.0,
+                                canvas_w,
+                                canvas_h,
+                                0.0,
+                                false,
+                                false,
+                            );
+                            let mut curr = m_default;
+                            for c in &qtblends {
+                                if c.5.abs() > 0.001 || (c.4 - 1.0).abs() > 0.001 {
+                                    let m_rot = FrameBuffer::build_affine_matrix_with_dar(
+                                        canvas_w,
+                                        canvas_h,
+                                        c.0,
+                                        c.1,
+                                        c.2,
+                                        c.3,
+                                        c.5,
+                                        c.6,
+                                        c.7,
+                                        None,
+                                    );
+                                    curr = m_rot * curr;
+                                    entry_opacity *= c.4;
+                                }
+                            }
+                            curr
+                        }
+                    };
                     let total_opacity = prod_opacity * entry_opacity * transparency_opacity;
 
                     // 4. Render drop shadow if present
@@ -590,6 +595,10 @@ impl<'a> TimelineEvaluator<'a> {
                 if c3.exists() { return c3; }
                 let c4 = base.join("e01").join(fname);
                 if c4.exists() { return c4; }
+                let c4_2 = base.join("e02").join(fname);
+                if c4_2.exists() { return c4_2; }
+                let c4_3 = base.join("e03").join(fname);
+                if c4_3.exists() { return c4_3; }
                 let c5 = base.join("library").join(fname);
                 if c5.exists() { return c5; }
             }

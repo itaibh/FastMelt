@@ -135,12 +135,18 @@ fn main() {
 
     // Parse project for metadata & GPU evaluation
     let project = match MltProject::parse(&xml_content) {
-        Ok(p) => {
-            log_msg("MELT", &format!("Parsed project: profile={}x{} @ {}/{} fps, {} tractors, {} playlists, {} producers, consumer={:?}, total_frames={}",
+        Ok(mut p) => {
+            if p.root_dir.is_none() {
+                if let Some(parent) = Path::new(&resolved_path).parent() {
+                    p.root_dir = Some(parent.to_path_buf());
+                }
+            }
+            log_msg("MELT", &format!("Parsed project: profile={}x{} @ {}/{} fps, root_dir={:?}, {} tractors, {} playlists, {} producers, consumer={:?}, total_frames={}",
                 p.profile.width,
                 p.profile.height,
                 p.profile.frame_rate_num,
                 p.profile.frame_rate_den,
+                p.root_dir,
                 p.tractors.len(),
                 p.playlists.len(),
                 p.producers.len(),

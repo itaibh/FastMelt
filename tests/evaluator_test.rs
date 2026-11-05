@@ -349,3 +349,50 @@ fn test_luma_wipe_transition() {
     fb_1.apply_luma_wipe(&luma, 10, 10, 1.0, 0.05, false);
     assert_eq!(fb_1.data[(5 * 10 + 0) * 4 + 3], 255);
 }
+
+#[test]
+fn test_mlt_root_dir_parsing() {
+    let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<mlt root="/home/user/my_project" version="7.43.0">
+  <profile width="1920" height="1080"/>
+</mlt>"#;
+    let proj = mlt_7::parser::MltProject::parse(xml).expect("Parse failed");
+    assert_eq!(
+        proj.root_dir,
+        Some(std::path::PathBuf::from("/home/user/my_project"))
+    );
+}
+
+#[test]
+fn test_native_size_producer_transform_handling() {
+    // Verify that when a producer has a native-size filter (e.g. 0 0 452 598 for a 452x598 image),
+    // and entry specifies placement (417 480 219 374),
+    // the matrix places the corners at exactly (417, 480) and (417+219, 480+374) without compounding.
+    let src_w = 452.0f32;
+    let src_h = 598.0f32;
+    let rect_x = 417.0f32;
+    let rect_y = 480.0f32;
+    let rect_w = 219.0f32;
+    let rect_h = 374.0f32;
+
+    let m_place = FrameBuffer::build_affine_matrix_with_dar(
+        src_w,
+        src_h,
+        rect_x,
+        rect_y,
+        rect_w,
+        rect_h,
+        0.0,
+        false,
+        true, // distort to exact rect
+        None,
+    );
+
+    let top_left = m_place.transform_point2(glam::vec2(0.0, 0.0));
+    let bottom_right = m_place.transform_point2(glam::vec2(src_w, src_h));
+
+    assert!((top_left.x - rect_x).abs() < 0.01);
+    assert!((top_left.y - rect_y).abs() < 0.01);
+    assert!((bottom_right.x - (rect_x + rect_w)).abs() < 0.01);
+    assert!((bottom_right.y - (rect_y + rect_h)).abs() < 0.01);
+}

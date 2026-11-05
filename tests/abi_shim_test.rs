@@ -1,5 +1,5 @@
 use libloading::Library;
-use std::ffi::{CStr, c_char, c_int, c_void};
+use std::ffi::{CStr, c_char, c_void};
 use std::path::PathBuf;
 
 #[test]

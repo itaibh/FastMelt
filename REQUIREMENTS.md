@@ -205,7 +205,18 @@ Accelerate render speeds from **~7 fps** to **45–60+ fps** by moving layer tra
   - `src/abi.rs`: Rust implementations for intercepted functions (`mlt_factory_init`, `mlt_factory_close`).
 - **Status**: Verified working with integration tests (`tests/abi_shim_test.rs`), `cargo test`, and `flatpak run --command=melt org.kde.kdenlive -version`.
 
-### Phase 6: Direct Vulkan/OpenGL Compute Shaders & Extended Blend Modes [FUTURE]
+### Phase 6: Timeline Evaluation & Matrix Composition Fixes (v0.1.13) [COMPLETED]
+- **Goal**: Fix missing episode assets (titles, audio) and misaligned mouth/eye overlay transforms in complex timelines (e.g. e02).
+- **Implementation**:
+  - `src/parser.rs`: Added extraction of `root="..."` attribute from `<mlt>` tag and `<property name="root">` / `<property name="kdenlive:docfolder">`, enabling relative episode assets (`e02_title.png`, local clips) to resolve directly.
+  - `src/bin/melt.rs`: Added automatic `p.root_dir` fallback to the input XML parent directory.
+  - `src/evaluator.rs`:
+    - Fixed native-size producer filters: recognized default `0 0 src_w src_h` filters as identity rather than active transforms, preventing double-scaling of facial cutouts, mouth shapes, and titles.
+    - Simplified affine matrix composition: maps directly from `(src_w, src_h)` to entry placement rect without compounding canvas DAR twice.
+    - Added episode directories (`e02`, `e03`) to asset search paths in `resolve_path`.
+- **Status**: Verified working with unit tests (`tests/evaluator_test.rs` - 14/14 passing).
+
+### Phase 7: Direct Vulkan/OpenGL Compute Shaders & Extended Blend Modes [FUTURE]
 - **Goal**: Offload compositing blits directly to Vulkan / OpenGL compute shaders to scale throughput towards 60+ fps.
 - **Implementation**:
   - Transition from SIMD/CPU blitter to Vulkan compute pipelines sharing memory surfaces directly with VA-API/DMA-BUF encoder.

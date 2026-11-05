@@ -330,6 +330,31 @@ impl MltProject {
         let mut project = MltProject::default();
         let mut last_tractor_id = None;
 
+        // Extract root attribute from <mlt> if present
+        let root_elem = doc.root_element();
+        if root_elem.tag_name().name() == "mlt" {
+            if let Some(r) = root_elem.attribute("root") {
+                if !r.is_empty() {
+                    project.root_dir = Some(PathBuf::from(r));
+                }
+            }
+        }
+
+        // Also check if any property child under <mlt> specifies root or kdenlive:docfolder
+        for child in root_elem.children() {
+            if child.tag_name().name() == "property" {
+                if child.attribute("name") == Some("root")
+                    || child.attribute("name") == Some("kdenlive:docfolder")
+                {
+                    if let Some(text) = child.text() {
+                        if !text.is_empty() && project.root_dir.is_none() {
+                            project.root_dir = Some(PathBuf::from(text));
+                        }
+                    }
+                }
+            }
+        }
+
         for node in doc.descendants() {
             match node.tag_name().name() {
                 "profile" => {
