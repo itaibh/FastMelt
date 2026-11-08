@@ -219,6 +219,34 @@ pub struct Consumer {
     pub extra_args: HashMap<String, String>,
 }
 
+impl Consumer {
+    pub fn is_audio_target(target: &str) -> bool {
+        let clean_target = target.split('?').next().unwrap_or(target);
+        if let Some(ext) = std::path::Path::new(clean_target).extension().and_then(|e| e.to_str()) {
+            let lower = ext.to_lowercase();
+            matches!(
+                lower.as_str(),
+                "wav" | "mp3" | "ogg" | "flac" | "m4a" | "aac" | "opus" | "wma" | "aiff" | "aif" | "ac3" | "alac"
+            )
+        } else {
+            false
+        }
+    }
+
+    pub fn is_audio_only(&self) -> bool {
+        if self.vcodec.eq_ignore_ascii_case("none") || self.vcodec.eq_ignore_ascii_case("off") {
+            return true;
+        }
+        if self.extra_args.get("vn").map(|s| s.as_str()) == Some("1")
+            || self.extra_args.get("novideo").map(|s| s.as_str()) == Some("1")
+            || self.extra_args.get("video_off").map(|s| s.as_str()) == Some("1")
+        {
+            return true;
+        }
+        Self::is_audio_target(&self.target)
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct MltProject {
     pub profile: Profile,
@@ -565,9 +593,17 @@ impl MltProject {
                         .map(|s| Self::parse_time_str(s, project.profile.frame_rate_num, project.profile.frame_rate_den));
                     let mut out_frame = node.attribute("out")
                         .map(|s| Self::parse_time_str(s, project.profile.frame_rate_num, project.profile.frame_rate_den));
-                    let mut vcodec = String::new();
-                    let mut acodec = String::new();
+                    let mut vcodec = node.attribute("vcodec").unwrap_or("").to_string();
+                    let mut acodec = node.attribute("acodec").unwrap_or("").to_string();
                     let mut extra_args = HashMap::new();
+
+                    for attr in node.attributes() {
+                        let name = attr.name();
+                        let val = attr.value().trim();
+                        if name != "target" && name != "in" && name != "out" && name != "vcodec" && name != "acodec" {
+                            extra_args.insert(name.to_string(), val.to_string());
+                        }
+                    }
 
                     for prop in node.children().filter(|c| c.tag_name().name() == "property") {
                         if let Some(name) = prop.attribute("name") {

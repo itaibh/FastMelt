@@ -396,3 +396,46 @@ fn test_native_size_producer_transform_handling() {
     assert!((bottom_right.x - (rect_x + rect_w)).abs() < 0.01);
     assert!((bottom_right.y - (rect_y + rect_h)).abs() < 0.01);
 }
+
+#[test]
+fn test_audio_only_export_detection() {
+    use mlt_7::parser::Consumer;
+
+    // Test audio target extension checks
+    assert!(Consumer::is_audio_target("output.wav"));
+    assert!(Consumer::is_audio_target("/path/to/render.MP3"));
+    assert!(Consumer::is_audio_target("audio.flac"));
+    assert!(Consumer::is_audio_target("track.m4a"));
+    assert!(Consumer::is_audio_target("stream.opus"));
+    assert!(!Consumer::is_audio_target("video.mp4"));
+    assert!(!Consumer::is_audio_target("clip.mkv"));
+    assert!(!Consumer::is_audio_target("animation.webm"));
+
+    // Test consumer is_audio_only properties
+    let audio_consumer = Consumer {
+        target: "/renders/final.wav".to_string(),
+        vcodec: "".to_string(),
+        acodec: "pcm_s16le".to_string(),
+        in_frame: None,
+        out_frame: None,
+        extra_args: std::collections::HashMap::new(),
+    };
+    assert!(audio_consumer.is_audio_only());
+
+    // Video extension but vn=1 or vcodec=none
+    let mut vn_consumer = Consumer {
+        target: "/renders/final.mp4".to_string(),
+        vcodec: "none".to_string(),
+        acodec: "aac".to_string(),
+        in_frame: None,
+        out_frame: None,
+        extra_args: std::collections::HashMap::new(),
+    };
+    assert!(vn_consumer.is_audio_only());
+
+    vn_consumer.vcodec = "h264".to_string();
+    assert!(!vn_consumer.is_audio_only());
+
+    vn_consumer.extra_args.insert("vn".to_string(), "1".to_string());
+    assert!(vn_consumer.is_audio_only());
+}

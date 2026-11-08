@@ -195,6 +195,38 @@ fn main() {
     // Determine target output file
     let target_file = cli_target.or_else(|| project.as_ref().and_then(|p| p.get_consumer_target()));
 
+    // FR-5.2: Audio-Only Export Full-Project Passthrough
+    // If the target is an audio format or the consumer has video disabled, pass through directly to stock melt
+    let is_audio_only = target_file.as_ref().map_or(false, |t| mlt_7::parser::Consumer::is_audio_target(t))
+        || project.as_ref().and_then(|p| p.consumer.as_ref()).map_or(false, |c| c.is_audio_only())
+        || args.iter().any(|arg| {
+            arg == "vn=1"
+                || arg == "novideo=1"
+                || arg == "vcodec=none"
+                || arg.starts_with("vcodec=none")
+        });
+
+    if is_audio_only {
+        log_msg("MELT", &format!(
+            "Audio-only export detected (target: {:?}). Passing through to upstream MLT engine...",
+            target_file
+        ));
+        let code = match UpstreamMlt::delegate_to_stock_melt(&args[1..]) {
+            Ok(c) => c,
+            Err(e) => {
+                log_msg("MELT", &format!("Error executing upstream render delegate: {}", e));
+                1
+            }
+        };
+        log_msg("MELT", &format!(
+            "Upstream audio render finished in {:.2}s with exit code: {}",
+            start_time.elapsed().as_secs_f64(),
+            code
+        ));
+        log_msg("MELT", "=== INVOCATION END ===");
+        std::process::exit(code);
+    }
+
     // Phase 1 Hardware Encoder Pipeline:
     // If we have a project and a target video file (and not a null probe), execute direct hardware encoder sink
     if let (Some(proj), Some(target)) = (project.as_ref(), target_file.as_ref()) {

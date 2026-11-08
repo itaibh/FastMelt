@@ -109,9 +109,12 @@ Accelerate render speeds from **~7 fps** to **45–60+ fps** by moving layer tra
 ### FR-5: Transparent Dynamic Fallback
 - **FR-5.1 Upstream Engine Proxy**:
   - When encountering unhandled complex MLT trees or unsupported transitions, gracefully delegate execution to `/app/bin/melt-7` with full argument fidelity and inherited pipes.
-- **FR-5.2 Infinite Recursion Protection**:
+- **FR-5.2 Audio-Only Export Full-Project Passthrough**:
+  - Automatically detect audio-only export jobs (e.g., target extensions `.wav`, `.mp3`, `.ogg`, `.flac`, `.aac`, `.m4a`, `.opus`, `.wma`, `.aiff`, or consumer properties `vn=1`/`vcodec=none`).
+  - Completely bypass FastMelt's video compositor, texture cache, VA-API hardware encoder, and muxer, passing through execution directly to upstream `melt` / `libmlt` to handle native audio rendering.
+- **FR-5.3 Infinite Recursion Protection**:
   - Ensure fallback candidates strictly exclude the running executable to prevent recursion.
-- **FR-5.3 Dynamic Library Proxy (`libmlt-7.so`)**:
+- **FR-5.4 Dynamic Library Proxy (`libmlt-7.so`)**:
   - Dynamically load upstream `libmlt-7.so` via `dlopen` to proxy unsupported individual filters.
 
 ### FR-6: C-ABI Compatibility (`libmlt.so`)
@@ -148,7 +151,7 @@ Accelerate render speeds from **~7 fps** to **45–60+ fps** by moving layer tra
 | **Timeline Engine** | Frame-by-frame slice evaluator, linear keyframe interpolation, active track stacking, nested sequence tractor evaluation, multi-transform chaining with DAR preservation. | **Complete** |
 | **Consumer / Sink** | Direct VA-API hardware encoder subprocess (`/dev/dri/renderD128`) with piped RGBA framebuffers and burned subtitle integration. | **Complete** |
 | **Audio Subsystem** | Concurrent background audio pass via synthesized audio-only MLT XML, rendering to PCM WAV and zero-loss muxing into final MP4 container. | **Complete** |
-| **Fallback Manager** | Safe CLI delegation to stock `melt-7` with strict recursion prevention. | **Complete** |
+| **Fallback Manager** | Safe CLI delegation to stock `melt-7` with strict recursion prevention; full-project passthrough for audio-only exports. | **Complete** |
 | **ABI Proxy Shim** | Universal drop-in `libmlt_7.so` exporting all 581 MLT functions with exact GNU ld version nodes (`MLT_0.8.8`..`MLT_7.42.0`), dlopen dispatch, and x86_64 assembly trampolines. | **Complete** |
 
 ---

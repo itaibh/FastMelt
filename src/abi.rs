@@ -98,6 +98,11 @@ pub extern "C" fn rust_mlt_consumer_start(consumer: MltConsumer) -> c_int {
         let target_str = CStr::from_ptr(target_ptr).to_string_lossy().into_owned();
         log_msg("ABI", &format!("Render consumer detected: target = {}", target_str));
 
+        if crate::parser::Consumer::is_audio_target(&target_str) {
+            log_msg("ABI", &format!("Audio-only render consumer detected (target = {}). Delegating directly to stock MLT...", target_str));
+            return fallback_fn(consumer);
+        }
+
         // 2. Inspect connected producer resource
         let mut xml_path: Option<String> = None;
         if !real_mlt_consumer_service.is_null()

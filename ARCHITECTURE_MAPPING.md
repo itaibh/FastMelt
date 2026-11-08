@@ -1,6 +1,6 @@
 # FastMelt Architecture & Implementation Specification
 
-**Version**: FastMelt v0.1.14  
+**Version**: FastMelt v0.1.15  
 **Target Reference**: MLT 7.43.0 / Kdenlive 24+  
 **Branch**: `main` (unifying `melt` CLI, `libmlt_7.so` dynamic proxy, and upstream clip-level fallback)
 
@@ -23,7 +23,7 @@ FastMelt operates under a hybrid unified architecture:
 ### Module 1: `src/bin/melt.rs` (CLI Entry Point)
 | Method / Function | Signature | File & Lines | Purpose & Behavior |
 | :--- | :--- | :--- | :--- |
-| `main` | `fn main()` | [`src/bin/melt.rs:17-349`](src/bin/melt.rs) | - Parses CLI args (`-progress2`, `-loglevel`, `-consumer`, `in=`, `out=`, etc.).<br>- Probes `-version` (`melt 7.43.0 (FastMelt v0.1.14)`).<br>- Reads and URL-decodes MLT XML; parses with `MltProject::parse`.<br>- Spawns `HardwareEncoder` (VA-API).<br>- Spawns concurrent audio thread via `audio::render_audio_pass`.<br>- Evaluates frames sequentially (`evaluator.evaluate_frame`).<br>- Muxes audio/video via FFmpeg and exits with return code.<br>- **Fallback behavior**: Delegates to `UpstreamMlt::delegate_to_stock_melt` if no XML is passed or hardware encoder fails. |
+| `main` | `fn main()` | [`src/bin/melt.rs:17-349`](src/bin/melt.rs) | - Parses CLI args (`-progress2`, `-loglevel`, `-consumer`, `in=`, `out=`, etc.).<br>- Probes `-version` (`melt 7.43.0 (FastMelt v0.1.15)`).<br>- Reads and URL-decodes MLT XML; parses with `MltProject::parse`.<br>- Bypasses video processing for audio-only exports via full-project passthrough.<br>- Spawns `HardwareEncoder` (VA-API).<br>- Spawns concurrent audio thread via `audio::render_audio_pass`.<br>- Evaluates frames sequentially (`evaluator.evaluate_frame`).<br>- Muxes audio/video via FFmpeg and exits with return code.<br>- **Fallback behavior**: Delegates to `UpstreamMlt::delegate_to_stock_melt` if no XML is passed or hardware encoder fails. |
 
 ### Module 2: `src/fallback.rs` (Upstream MLT Dynamic Loader & Clip Renderer)
 | Method / Function | Signature | File & Lines | Purpose & Behavior |
